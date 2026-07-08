@@ -1,6 +1,99 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Terminal, RefreshCw, XCircle, AlertCircle, PlayCircle, Loader2, Trash2 } from 'lucide-react';
 
+// ────────────────────────────────────────────────────────────
+// Komponen: SubProgressPanel
+// Menampilkan data sub-progress real-time dari proses AI
+// ────────────────────────────────────────────────────────────
+function SubProgressPanel({ subProgress }) {
+  // Jangan render apapun jika data tidak ada
+  if (!subProgress) return null;
+
+  const {
+    phase,
+    segment,
+    total_segments,
+    pct,
+    step,
+    total_steps,
+    speed,
+    eta_seconds,
+  } = subProgress;
+
+  // Peta ikon berdasarkan nama fase
+  const phaseIcon = {
+    'Sintesis Suara'      : '🎙️',
+    'Generasi Musik AI'   : '🎵',
+    'Generasi Gambar AI'  : '🖼️',
+    'Render Video'        : '🎬',
+  }[phase] || '⚙️';
+
+  // Format ETA ke string yang mudah dibaca
+  const formatEta = (seconds) => {
+    if (seconds == null || seconds <= 0) return null;
+    if (seconds >= 60) {
+      const menit = Math.floor(seconds / 60);
+      const detik = Math.round(seconds % 60);
+      return detik > 0 ? `${menit} mnt ${detik} dtk` : `${menit} menit`;
+    }
+    return `~${Math.round(seconds)} dtk`;
+  };
+
+  const etaText  = formatEta(eta_seconds);
+  const fillPct  = Math.min(Math.max(pct ?? 0, 0), 100);
+  const hasSpeed = speed && speed > 0;
+  const hasSegment = segment != null && total_segments != null;
+
+  return (
+    <div className="sub-progress-panel">
+      {/* Baris atas: nama fase + info segmen */}
+      <div className="sub-progress-header">
+        <span className="sub-progress-phase">
+          <span className="sub-progress-phase-icon">{phaseIcon}</span>
+          {phase || 'Memproses...'}
+        </span>
+        {hasSegment && (
+          <span className="sub-progress-segment">
+            Segmen {segment} / {total_segments}
+          </span>
+        )}
+      </div>
+
+      {/* Progress bar dengan shimmer */}
+      <div className="sub-progress-bar-bg">
+        <div
+          className="sub-progress-bar-fill"
+          style={{ width: `${fillPct}%` }}
+        />
+      </div>
+
+      {/* Label persentase + step */}
+      <div className="sub-progress-step-row">
+        <span className="sub-progress-pct">{fillPct.toFixed(1)}%</span>
+        {step != null && total_steps != null && (
+          <span className="sub-progress-step-detail">
+            langkah {step} / {total_steps}
+          </span>
+        )}
+      </div>
+
+      {/* Baris bawah: kecepatan + ETA */}
+      <div className="sub-progress-footer">
+        {hasSpeed ? (
+          <span className="speed-badge">
+            ⚡ {speed.toFixed(1)} it/s
+          </span>
+        ) : (
+          <span />
+        )}
+        {etaText && (
+          <span className="eta-label">ETA {etaText}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ScrollingLogs({ logs }) {
   const containerRef = useRef(null);
 
@@ -107,6 +200,11 @@ export default function TasksList({ tasks, onCancelTask, onDeleteTask, onResumeT
                       />
                     </div>
                   </div>
+
+                  {/* Panel sub-progress — hanya muncul saat task sedang berjalan */}
+                  {isProcessing && task.sub_progress && (
+                    <SubProgressPanel subProgress={task.sub_progress} />
+                  )}
 
                   <div className="task-actions">
                     <button 

@@ -3,6 +3,7 @@ import os
 if "no_proxy" in os.environ:
     os.environ["no_proxy"] = ",".join([part for part in os.environ["no_proxy"].split(",") if ":" not in part])
 
+import re
 import sys
 import uuid
 import json
@@ -143,6 +144,8 @@ def init_db():
         cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS local_cfg FLOAT")
         cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS local_seed INT")
         cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS local_negative_prompt TEXT")
+        # Kolom sub_progress untuk real-time tracking proses TTS/Music/Image
+        cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS sub_progress JSONB DEFAULT NULL")
         
         cur.execute("""
             CREATE TABLE IF NOT EXISTS videos (
@@ -527,6 +530,85 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
             conn.close()
         except Exception as db_e:
             print(f"Failed to update task state in DB: {db_e}")
+
+    # ── Helper: simpan sub_progress ke database ───────────────────────────────
+    def update_sub_progress(data: dict):
+        """Simpan data sub-progress (step, speed, ETA) ke kolom sub_progress di DB."""
+        try:
+            conn = get_db_conn()
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE tasks SET sub_progress = %s WHERE id = %s",
+                (json.dumps(data), task_id)
+            )
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"Failed to update sub_progress: {e}")
+
+    # ── Helper: clear sub_progress saat task selesai atau gagal ───────────────
+    def clear_sub_progress():
+        """Hapus data sub-progress setelah task selesai atau gagal."""
+        try:
+            conn = get_db_conn()
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE tasks SET sub_progress = NULL WHERE id = %s",
+                (task_id,)
+            )
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"Failed to clear sub_progress: {e}")
+
+    # ── Pola regex untuk mem-parse output tqdm ────────────────────────────────
+    # Contoh baris: " 45%|████      | 450/1000 [00:15<00:18, 28.50it/s]"
+    TQDM_RE = re.compile(r'(\d+)%.*?(\d+)/(\d+).*?([\d.]+)it/s')
+
+    def run_subprocess_with_progress(cmd: list, phase: str, segment: int = None, total_segments: int = None) -> tuple:
+        """
+        Jalankan subprocess dan baca stdout line-by-line untuk mem-parse
+        output tqdm progress. Setiap match akan memanggil update_sub_progress.
+
+        Returns:
+            tuple: (stdout_combined: str, returncode: int)
+        """
+        stdout_lines = []
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # gabung stderr ke stdout agar tqdm terbaca
+                text=True,
+                bufsize=1  # line-buffered
+            )
+            for line in proc.stdout:
+                stdout_lines.append(line)
+                m = TQDM_RE.search(line)
+                if m:
+                    pct = float(m.group(1))
+                    step_val = int(m.group(2))
+                    total_steps = int(m.group(3))
+                    speed = float(m.group(4))
+                    remaining = total_steps - step_val
+                    eta_seconds = int(remaining / speed) if speed > 0 else None
+                    update_sub_progress({
+                        "phase": phase,
+                        "segment": segment,
+                        "total_segments": total_segments,
+                        "pct": pct,
+                        "step": step_val,
+                        "total_steps": total_steps,
+                        "speed": speed,
+                        "eta_seconds": max(0, eta_seconds) if eta_seconds is not None else None
+                    })
+            proc.wait()
+            return "".join(stdout_lines), proc.returncode
+        except Exception as e:
+            print(f"run_subprocess_with_progress error: {e}")
+            return "", 1
             
     def check_cancelled():
         try:
@@ -636,13 +718,21 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
             interpreter = sys.executable
             script_path = os.path.join(BASE_DIR, "generate_tts_local.py")
             
-            cmd = [interpreter, script_path, script_text, wav_path, language]
+            cmd = [interpreter, script_path, script_text, wav_path, language, voice_name]
             print(f"Running local TTS subprocess: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            
-            if result.returncode != 0:
-                raise Exception(f"Chatterbox TTS subprocess failed: {result.stderr}")
-                
+            # Gunakan Popen agar progress tqdm bisa dibaca real-time
+            stdout_out, returncode = run_subprocess_with_progress(
+                cmd,
+                phase="Sintesis Suara",
+                segment=None,
+                total_segments=None
+            )
+            # Bersihkan sub_progress TTS sebelum lanjut ke tahap berikutnya
+            clear_sub_progress()
+
+            if returncode != 0:
+                raise Exception(f"Chatterbox TTS subprocess failed: {stdout_out}")
+
             update_db(45, "Voice Synthesis", "Voice Synthesis", f"Audio file synthesized locally. Saved to static/audio_{task_id}.wav")
             
             # Load audio to get its duration
@@ -692,7 +782,21 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                 music_duration = int(audio_duration) + 4
 
                 music_cmd = [local_benchmark_python_music, music_script, music_prompt, raw_music_path, str(music_duration)]
-                music_result = subprocess.run(music_cmd, capture_output=True, text=True, check=False, timeout=300)
+                # Gunakan Popen agar progress tqdm MusicGen bisa dibaca real-time
+                music_stdout, music_returncode = run_subprocess_with_progress(
+                    music_cmd,
+                    phase="Generasi Musik AI",
+                    segment=None,
+                    total_segments=None
+                )
+                # Bersihkan sub_progress music sebelum lanjut ke mixing
+                clear_sub_progress()
+                # Buat objek kompatibel dengan kode lama yang cek returncode dan path
+                class _MusicResult:
+                    def __init__(self, rc, out):
+                        self.returncode = rc
+                        self.stderr = out
+                music_result = _MusicResult(music_returncode, music_stdout)
                 if music_result.returncode == 0 and os.path.exists(raw_music_path):
                     update_db(49, "AI Music", "AI Music", "Music generated. Ducking audio levels dynamically...")
                     # Dynamic audio ducking: mix voiceover (70%) + background music (duck to 30% during speech, 70% silent)
@@ -848,19 +952,33 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                         "--seed", str(local_seed),
                         "--negative-prompt", local_negative_prompt
                     ]
-                    img_result = subprocess.run(img_cmd, capture_output=True, text=True, check=False, timeout=300)
+                    # Gunakan Popen agar progress tqdm SDXL bisa dibaca real-time per scene
+                    img_stdout, img_returncode = run_subprocess_with_progress(
+                        img_cmd,
+                        phase="Generasi Gambar AI",
+                        segment=i + 1,
+                        total_segments=len(scene_paragraphs)
+                    )
+                    # Bersihkan sub_progress image scene ini sebelum lanjut
+                    clear_sub_progress()
 
-                    if img_result.returncode == 0 and os.path.exists(img_path):
+                    if img_returncode == 0 and os.path.exists(img_path):
                         update_db(54 + i, "AI Visuals", "AI Visuals", f"Scene {i+1}/{len(scene_paragraphs)} image generated. Applying camera motion...")
                         # 2. Apply Ken Burns camera motion
                         cam_cmd = [local_benchmark_python_img, cam_motion_script, img_path, scene_clip_path, str(round(scene_duration, 2))]
-                        cam_result = subprocess.run(cam_cmd, capture_output=True, text=True, check=False, timeout=60)
-                        if cam_result.returncode == 0 and os.path.exists(scene_clip_path):
+                        cam_stdout, cam_returncode = run_subprocess_with_progress(
+                            cam_cmd,
+                            phase="Animasi Kamera",
+                            segment=i + 1,
+                            total_segments=len(scene_paragraphs)
+                        )
+                        clear_sub_progress()
+                        if cam_returncode == 0 and os.path.exists(scene_clip_path):
                             ai_scene_clips.append(scene_clip_path)
                         else:
-                            print(f"Camera motion failed for scene {i}: {cam_result.stderr}")
+                            print(f"Camera motion failed for scene {i}: {cam_stdout}")
                     else:
-                        print(f"Image generation failed for scene {i}: {img_result.stderr}")
+                        print(f"Image generation failed for scene {i}: {img_stdout}")
 
                 if ai_scene_clips:
                     update_db(60, "AI Visuals", "AI Visuals", f"{len(ai_scene_clips)}/{len(scene_paragraphs)} AI animated scenes ready.")
@@ -1020,6 +1138,8 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         time.sleep(sleep_step)
         update_db(95, "Finalizing", "Finalizing", "Optimizing for web playback (FastStart)...")
         
+        # Bersihkan sub_progress dan tandai task selesai
+        clear_sub_progress()
         update_db(100, "Completed", "Completed", "Video generation completed successfully!", status="Completed")
         
         title = f"Video: {actual_subject[:40]}..." if len(actual_subject) > 40 else actual_subject
@@ -1049,12 +1169,14 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         traceback.print_exc()
         print(f"Error processing task {task_id} in background: {err}")
         logs.append(log_line("System Error", f"Task processing failed: {str(err)}"))
+        # Bersihkan sub_progress saat task gagal
+        clear_sub_progress()
         try:
             conn = get_db_conn()
             conn.autocommit = True
             cur = conn.cursor()
             cur.execute(
-                "UPDATE tasks SET status = 'Failed', step = 'Failed', logs = %s WHERE id = %s",
+                "UPDATE tasks SET status = 'Failed', step = 'Failed', logs = %s, sub_progress = NULL WHERE id = %s",
                 (json.dumps(logs), task_id)
             )
             cur.close()
@@ -1092,6 +1214,14 @@ def get_task_status_db(task_id: str) -> Dict[str, Any]:
     elif logs_data is None:
         logs_data = []
         
+    # Parse sub_progress dari JSONB (bisa berupa dict atau string)
+    sub_progress_data = task.get("sub_progress")
+    if isinstance(sub_progress_data, str):
+        try:
+            sub_progress_data = json.loads(sub_progress_data)
+        except Exception:
+            sub_progress_data = None
+
     return {
         "task_id": task["id"],
         "video_subject": task["subject"],
@@ -1099,6 +1229,7 @@ def get_task_status_db(task_id: str) -> Dict[str, Any]:
         "progress": task["progress"],
         "step": task["step"],
         "logs": logs_data,
+        "sub_progress": sub_progress_data,
         "video_url": f"/static/video_{task_id}.mp4" if task["status"] == "Completed" else None
     }
 
@@ -1107,6 +1238,8 @@ def create_video_task(req: VideoRequest):
     task_id = f"task_{uuid.uuid4().hex[:8]}"
     config = load_config()
     tts_provider = config.get("tts_provider", "edge-tts")
+    if "Standard" in req.voice_name or "chatterbox" in req.voice_name:
+        tts_provider = "local-chatterbox"
     
     duration_seconds = float(req.paragraph_number * 20.0)
     created_at = time.time()
@@ -1174,6 +1307,14 @@ def get_all_tasks():
         elif logs_data is None:
             logs_data = []
             
+        # Parse sub_progress dari JSONB
+        sp = row.get("sub_progress")
+        if isinstance(sp, str):
+            try:
+                sp = json.loads(sp)
+            except Exception:
+                sp = None
+
         tasks.append({
             "task_id": row["id"],
             "video_subject": row["subject"],
@@ -1181,6 +1322,7 @@ def get_all_tasks():
             "progress": row["progress"],
             "step": row["step"],
             "logs": logs_data,
+            "sub_progress": sp,
             "video_url": f"/static/video_{row['id']}.mp4" if row["status"] == "Completed" else None
         })
     return tasks
@@ -1298,6 +1440,8 @@ def resume_task(task_id: str):
 
         config = load_config()
         tts_provider = config.get("tts_provider", "edge-tts")
+        if "Standard" in task["voice_name"] or "chatterbox" in task["voice_name"]:
+            tts_provider = "local-chatterbox"
 
         threading.Thread(
             target=process_task_background,

@@ -1343,3 +1343,149 @@ textarea:focus {
 .voice-play-icon:hover {
   transform: scale(1.15);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   SubProgressPanel — Panel sub-progress real-time per task
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Animasi shimmer untuk progress bar */
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+
+/* Animasi pulse untuk speed badge */
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
+  50%       { opacity: 0.65; box-shadow: 0 0 2px rgba(16, 185, 129, 0.2); }
+}
+
+/* Container utama panel */
+.sub-progress-panel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  /* Fade in halus saat muncul */
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Baris atas: nama fase & info segmen */
+.sub-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Nama fase (icon + teks) */
+.sub-progress-phase {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.01em;
+}
+
+.sub-progress-phase-icon {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+/* Badge "Segmen X / Y" di kanan header */
+.sub-progress-segment {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-secondary);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.18);
+  padding: 2px 8px;
+  border-radius: 20px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Background track progress bar */
+.sub-progress-bar-bg {
+  width: 100%;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* Fill bar dengan efek shimmer bergerak */
+.sub-progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  /* Gradien dengan warna primer → sekunder → primer agar shimmer mulus */
+  background: linear-gradient(
+    90deg,
+    var(--color-primary)        0%,
+    var(--color-secondary)      35%,
+    rgba(255, 255, 255, 0.55)   50%,
+    var(--color-secondary)      65%,
+    var(--color-primary)        100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s linear infinite;
+  transition: width 0.5s ease-out;
+  min-width: 4px; /* selalu terlihat meski persentase sangat kecil */
+}
+
+/* Baris tengah: persentase + detail langkah */
+.sub-progress-step-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sub-progress-pct {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  letter-spacing: 0.02em;
+}
+
+.sub-progress-step-detail {
+  font-size: 0.70rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* Baris bawah: kecepatan (kiri) & ETA (kanan) */
+.sub-progress-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Badge kecepatan — berkedip hijau */
+.speed-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-success);
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  padding: 2px 8px;
+  border-radius: 20px;
+  animation: pulse-green 2s ease-in-out infinite;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Label ETA di kanan bawah */
+.eta-label {
+  font-size: 0.70rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}

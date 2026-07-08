@@ -7,7 +7,12 @@ const VOICES = [
   { name: "en-US-JennyNeural", label: "Jenny (English US - Female)", lang: "en" },
   { name: "en-GB-SoniaNeural", label: "Sonia (English UK - Female)", lang: "en" },
   { name: "en-GB-RyanNeural", label: "Ryan (English UK - Male)", lang: "en" },
-  { name: "id-ID-Standard", label: "Indonesian Narrator (Local Chatterbox)", lang: "id" },
+  { name: "en-US-Standard", label: "English Narrator (Auto-Cast Local Chatterbox)", lang: "en" },
+  { name: "en-chatterbox-male", label: "English Deep Male (Local Chatterbox)", lang: "en" },
+  { name: "en-chatterbox-female", label: "English Expressive Female (Local Chatterbox)", lang: "en" },
+  { name: "id-ID-Standard", label: "Indonesian Narrator (Auto-Cast Local Chatterbox)", lang: "id" },
+  { name: "id-chatterbox-male", label: "Indonesian Deep Male (Local Chatterbox)", lang: "id" },
+  { name: "id-chatterbox-female", label: "Indonesian Expressive Female (Local Chatterbox)", lang: "id" },
   { name: "es-ES-AlvaroNeural", label: "Alvaro (Spanish - Male)", lang: "es" },
   { name: "fr-FR-HenriNeural", label: "Henri (French - Male)", lang: "fr" }
 ];
