@@ -9,6 +9,35 @@ import re
 import torch
 import torchaudio as ta
 
+# Monkey-patch torch.Tensor.to to convert float64 (double) tensors to float32 on CPU
+# before moving them to MPS, since the Apple Silicon MPS framework does not support float64.
+_original_to = torch.Tensor.to
+def _patched_to(self, *args, **kwargs):
+    device = kwargs.get("device", None)
+    dtype = kwargs.get("dtype", None)
+    if args:
+        if isinstance(args[0], (str, torch.device)):
+            device = args[0]
+        elif isinstance(args[0], torch.dtype):
+            dtype = args[0]
+        if len(args) > 1 and isinstance(args[1], torch.dtype):
+            dtype = args[1]
+            
+    is_target_mps = False
+    if device is not None:
+        if isinstance(device, str) and "mps" in device:
+            is_target_mps = True
+        elif isinstance(device, torch.device) and device.type == "mps":
+            is_target_mps = True
+            
+    if is_target_mps and self.dtype == torch.float64:
+        self = self.float()
+    if is_target_mps and dtype == torch.float64:
+        kwargs["dtype"] = torch.float32
+        
+    return _original_to(self, *args, **kwargs)
+torch.Tensor.to = _patched_to
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: python generate_tts_local.py <text> <output_path> [language]")
@@ -17,10 +46,12 @@ def main():
     text = sys.argv[1]
     output_path = sys.argv[2]
     language = sys.argv[3].lower() if len(sys.argv) > 3 else "en"
+    voice_name = sys.argv[4] if len(sys.argv) > 4 else "default"
     
     device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Target language: '{language}'")
+    print(f"Voice name selection: '{voice_name}'")
     
     if language == "id":
         print("Loading ChatterboxTTS Indonesian model...")
@@ -113,37 +144,34 @@ def main():
     print(f"Generating TTS for {len(sentences_list)} segments...")
     wav_items = []
     try:
-        for idx, (content_text, is_dialogue) in enumerate(sentences_list):
-            print(f"Generating segment {idx+1}/{len(sentences_list)} (Dialogue={is_dialogue}): '{content_text[:40]}...'")
+        with torch.no_grad():
+            for idx, (content_text, is_dialogue) in enumerate(sentences_list):
+                print(f"Generating segment {idx+1}/{len(sentences_list)} (Dialogue={is_dialogue}): '{content_text[:40]}...'")
 
-            if language == "id":
-                if is_dialogue:
-                    # Younger/emotional voice prompt for characters in dialogue
-                    selected_ref = ref_wav_ex1
-                    exaggeration = 0.80
-                    temperature = 0.85
+                if language == "id":
+                    if voice_name == "id-chatterbox-female":
+                        selected_ref = ref_wav_ex1
+                        print("  [CASTING] Selected expressive female model (example1.wav)")
+                    elif voice_name == "id-chatterbox-male":
+                        selected_ref = ref_wav_ex2
+                        print("  [CASTING] Selected deep male narration model (example2.wav)")
+                    else:
+                        selected_ref = ref_wav_ex1 if is_dialogue else ref_wav_ex2
+                        print(f"  [CASTING] Auto-casting voice: {'female (example1.wav)' if is_dialogue else 'male (example2.wav)'}")
+                    
+                    exaggeration = 0.80 if is_dialogue else 0.85
+                    temperature = 0.85 if is_dialogue else 0.9
                     cfg_weight = 0.5
-                    print(f"  [CASTING] Selected expressive dialogue model (example1.wav)")
+                    
+                    wav = model.generate(
+                        content_text, 
+                        audio_prompt_path=selected_ref, 
+                        exaggeration=exaggeration, 
+                        temperature=temperature,
+                        cfg_weight=cfg_weight
+                    )
                 else:
-                    # Deep narrative voice prompt for first-person narration
-                    selected_ref = ref_wav_ex2
-                    exaggeration = 0.85
-                    temperature = 0.9
-                    cfg_weight = 0.5
-                    print(f"  [CASTING] Selected deep narration model (example2.wav)")
-
-                wav = model.generate(
-                    content_text, 
-                    audio_prompt_path=selected_ref, 
-                    exaggeration=exaggeration, 
-                    temperature=temperature,
-                    cfg_weight=cfg_weight
-                )
-            else:
-                # English Turbo version: Use native narrator for narration, and native English female for dialogue.
-                selected_ref = None
-                if is_dialogue:
-                    # Download native English reference voice if not present
+                    # English Turbo version
                     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
                     os.makedirs(static_dir, exist_ok=True)
                     lj_ref_path = os.path.join(static_dir, "ref_ljspeech.wav")
@@ -156,24 +184,41 @@ def main():
                         except Exception as dl_e:
                             print(f"Failed to download LJSpeech reference: {dl_e}")
                     
-                    if os.path.exists(lj_ref_path):
-                        selected_ref = lj_ref_path
-                        print(f"  [CASTING] Cloning native English female dialogue voice (ref_ljspeech.wav)")
+                    selected_ref = None
+                    if voice_name == "en-chatterbox-female":
+                        selected_ref = lj_ref_path if os.path.exists(lj_ref_path) else ref_wav_ex1
+                        print(f"  [CASTING] Selected English female voice ({'ref_ljspeech.wav' if selected_ref == lj_ref_path else 'example1.wav'})")
+                    elif voice_name == "en-chatterbox-male":
+                        selected_ref = None
+                        print("  [CASTING] Selected English built-in male narrator")
                     else:
-                        selected_ref = ref_wav_ex1
-                        print(f"  [CASTING] Fallback to example1.wav")
-                else:
-                    # Narration uses default native English voice (no clone prompt -> falls back to conds.pt)
-                    print(f"  [CASTING] Using built-in native English narrator voice")
+                        # Auto-cast logic
+                        if is_dialogue:
+                            selected_ref = lj_ref_path if os.path.exists(lj_ref_path) else ref_wav_ex1
+                            print(f"  [CASTING] Auto-casting English dialogue to female voice")
+                        else:
+                            selected_ref = None
+                            print("  [CASTING] Auto-casting English narration to built-in male voice")
+                    
+                    wav = model.generate(
+                        content_text, 
+                        audio_prompt_path=selected_ref,
+                        temperature=0.85
+                    )
                 
-                wav = model.generate(
-                    content_text, 
-                    audio_prompt_path=selected_ref,
-                    temperature=0.85
-                )
-            
-            wav_cpu = wav.cpu()
-            wav_items.append(wav_cpu)
+                wav_cpu = wav.cpu()
+                wav_items.append(wav_cpu)
+                del wav
+                if device == "mps":
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
+                elif device == "cuda":
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
             
         print("Concatenating audio segments with silent pauses...")
         final_wav_parts = []
@@ -204,7 +249,8 @@ def main():
             ta.save(output_path, wav_cpu, model.sr)
         print("TTS generation complete!")
     except Exception as e:
-        print(f"Error during generation: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
