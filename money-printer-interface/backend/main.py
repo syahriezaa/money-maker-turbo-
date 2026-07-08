@@ -509,6 +509,7 @@ def cleanup_task_files(task_id: str):
                 print(f"Error deleting file {f}: {e}")
 
 def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice_name: str, language: str, paragraph_number: int, duration_seconds: float, tts_provider: str):
+    print(f"[DEBUG] process_task_background STARTED for task {task_id}", flush=True)
     def log_line(category: str, message: str):
         log_time = datetime.now()
         return f"[{log_time.strftime('%Y-%m-%d %H:%M:%S')}] [{category}] {message}"
@@ -565,8 +566,6 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
 
     # ── Pola regex untuk mem-parse output tqdm ────────────────────────────────
     # Contoh baris: " 45%|████      | 450/1000 [00:15<00:18, 28.50it/s]"
-    TQDM_RE = re.compile(r'(\d+)%.*?(\d+)/(\d+).*?([\d.]+)it/s')
-
     def run_subprocess_with_progress(cmd: list, phase: str, segment: int = None, total_segments: int = None) -> tuple:
         """
         Jalankan subprocess dan baca output per-chunk (bukan per-baris) agar
@@ -575,9 +574,10 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         Returns:
             tuple: (stdout_combined: str, returncode: int)
         """
-        import time as _time
+        import time as _time_local
         all_output = []
         last_db_write = 0.0  # throttle: max 1x update per detik
+        _tqdm_re = re.compile(r'(\d+)%.*?(\d+)/(\d+).*?([\d.]+)it/s')
 
         try:
             proc = subprocess.Popen(
@@ -601,9 +601,9 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                     seg = seg.strip()
                     if not seg:
                         continue
-                    m = TQDM_RE.search(seg)
+                    m = _tqdm_re.search(seg)
                     if m:
-                        now = _time.time()
+                        now = _time_local.time()
                         if now - last_db_write >= 1.0:  # throttle 1 detik
                             last_db_write = now
                             pct = float(m.group(1))
@@ -925,7 +925,6 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                 cam_motion_script = os.path.join(BASE_DIR, "apply_camera_motion.py")
 
                 # Split script into visual scenes (sentences) and group them into slides of at least 15 words (~6-7 seconds per scene)
-                import re
                 raw_sents = re.split(r'(?<=[.!?])\s+', script_text.replace("\n\n", " ").replace("\n", " "))
                 sents = [s.strip() for s in raw_sents if s.strip()]
                 
