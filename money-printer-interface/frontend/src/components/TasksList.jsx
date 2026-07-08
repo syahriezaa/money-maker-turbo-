@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Terminal, RefreshCw, XCircle, AlertCircle, PlayCircle, Loader2 } from 'lucide-react';
+import { Terminal, RefreshCw, XCircle, AlertCircle, PlayCircle, Loader2, Trash2 } from 'lucide-react';
 
 function ScrollingLogs({ logs }) {
   const containerRef = useRef(null);
@@ -36,7 +36,7 @@ function ScrollingLogs({ logs }) {
   );
 }
 
-export default function TasksList({ tasks, onCancelTask }) {
+export default function TasksList({ tasks, onCancelTask, onDeleteTask, onResumeTask }) {
   const [expandedTaskLogs, setExpandedTaskLogs] = useState({});
 
   const toggleLogs = (taskId) => {
@@ -69,8 +69,13 @@ export default function TasksList({ tasks, onCancelTask }) {
           ) : (
             activeTasks.map(task => {
               const isExpanded = expandedTaskLogs[task.task_id];
-              const isProcessing = task.status === 'processing';
-              const isCompleted = task.status === 'Completed' || task.status === 'completed';
+              const statusLower = task.status ? task.status.toLowerCase() : '';
+              const isProcessing = statusLower === 'processing';
+              const isCompleted = statusLower === 'completed';
+              const isCancelled = statusLower === 'cancelled';
+              const isFailed = statusLower === 'failed';
+              const canResume = isCancelled || isFailed;
+              const canDelete = !isProcessing;
               
               return (
                 <div key={task.task_id} className="task-card">
@@ -111,15 +116,42 @@ export default function TasksList({ tasks, onCancelTask }) {
                       {isExpanded ? 'Hide Diagnostics Console' : 'Show Diagnostics Console'}
                     </button>
 
-                    {isProcessing && onCancelTask && (
-                      <button 
-                        className="btn btn-danger btn-icon-only"
-                        onClick={() => onCancelTask(task.task_id)}
-                        title="Cancel task"
-                      >
-                        <XCircle size={16} />
-                      </button>
-                    )}
+                    <div style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }}>
+                      {isProcessing && onCancelTask && (
+                        <button 
+                          className="btn btn-danger btn-icon-only"
+                          onClick={() => onCancelTask(task.task_id)}
+                          title="Cancel task"
+                        >
+                          <XCircle size={16} />
+                        </button>
+                      )}
+
+                      {canResume && onResumeTask && (
+                        <button 
+                          className="btn btn-secondary btn-icon-only"
+                          onClick={() => onResumeTask(task.task_id)}
+                          title="Resume task"
+                          style={{ color: 'var(--color-primary)' }}
+                        >
+                          <RefreshCw size={16} />
+                        </button>
+                      )}
+
+                      {canDelete && onDeleteTask && (
+                        <button 
+                          className="btn btn-danger btn-icon-only"
+                          onClick={() => {
+                            if (window.confirm("Are you sure you want to delete this task? All associated files will be removed.")) {
+                              onDeleteTask(task.task_id);
+                            }
+                          }}
+                          title="Delete task"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {isExpanded && (

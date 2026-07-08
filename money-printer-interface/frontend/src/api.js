@@ -53,3 +53,27 @@ export const getTasks = async () => {
   if (!response.ok) throw new Error("Failed to fetch tasks");
   return response.json();
 };
+
+export const cancelTask = async (taskId) => {
+  const response = await fetch(`${API_BASE}/api/v1/tasks/${taskId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error("Failed to cancel task");
+  return response.json();
+};
+
+export const deleteTask = async (taskId) => {
+  const response = await fetch(`${API_BASE}/api/v1/tasks/${taskId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) throw new Error("Failed to delete task");
+  return response.json();
+};
+
+export const resumeTask = async (taskId) => {
+  const response = await fetch(`${API_BASE}/api/v1/tasks/${taskId}/resume`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error("Failed to resume task");
+  return response.json();
+};

@@ -11,9 +11,11 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-# Redirect all Hugging Face downloads to D: drive because C: drive is out of disk space
-os.environ["HF_HOME"] = r"D:\huggingface_cache"
-os.environ["HF_HUB_CACHE"] = r"D:\huggingface_cache"
+# Redirect all Hugging Face downloads to D: drive on Windows if D: drive is available, otherwise use default
+if sys.platform.startswith("win32") and os.path.exists("D:\\"):
+    os.environ["HF_HOME"] = r"D:\huggingface_cache"
+    os.environ["HF_HUB_CACHE"] = r"D:\huggingface_cache"
+
 
 # Clean no_proxy to avoid HTTPX IPv6 port parsing crash
 if "no_proxy" in os.environ:
@@ -57,10 +59,15 @@ def main():
     if args.height is not None:
         height = args.height
 
-    # Determine device
+    # Determine device (check MPS for Apple Silicon, then CUDA, then CPU)
     device = args.device
     if not device:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
 
     # Style suffix for positive prompt
     style_suffix = ", high quality anime illustration, masterwork, masterpiece, cell shading, flat colors, clean outlines"

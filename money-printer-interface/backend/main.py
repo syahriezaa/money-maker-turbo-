@@ -485,6 +485,26 @@ def get_pexels_video(query: str, api_key: str, aspect_ratio: str, target_duratio
 # Mount the static directory to serve video files
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+def cleanup_task_files(task_id: str):
+    import glob
+    patterns = [
+        f"audio_{task_id}.wav",
+        f"music_{task_id}.wav",
+        f"mixed_{task_id}.wav",
+        f"video_{task_id}.mp4",
+        f"scene_{task_id}_*.png",
+        f"scene_{task_id}_*.mp4",
+    ]
+    for pattern in patterns:
+        files = glob.glob(os.path.join(STATIC_DIR, pattern))
+        for f in files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+                    print(f"Cleaned up file: {f}")
+            except Exception as e:
+                print(f"Error deleting file {f}: {e}")
+
 def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice_name: str, language: str, paragraph_number: int, duration_seconds: float, tts_provider: str):
     def log_line(category: str, message: str):
         log_time = datetime.now()
@@ -507,6 +527,32 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
             conn.close()
         except Exception as db_e:
             print(f"Failed to update task state in DB: {db_e}")
+            
+    def check_cancelled():
+        try:
+            conn = get_db_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT status FROM tasks WHERE id = %s", (task_id,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row and row[0] and row[0].lower() == 'cancelled':
+                print(f"Task {task_id} detected as cancelled. Cleaning up and exiting thread.")
+                logs.append(log_line("Cancellation", "Task execution cancelled by user. Cleaning up files..."))
+                try:
+                    conn = get_db_conn()
+                    conn.autocommit = True
+                    cur = conn.cursor()
+                    cur.execute("UPDATE tasks SET logs = %s WHERE id = %s", (json.dumps(logs), task_id))
+                    cur.close()
+                    conn.close()
+                except Exception as db_e:
+                    print(f"Failed to update logs on cancellation: {db_e}")
+                cleanup_task_files(task_id)
+                return True
+        except Exception as e:
+            print(f"Error checking cancellation status: {e}")
+        return False
     
     try:
         # Fetch task-specific local generation settings
@@ -575,6 +621,8 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         time.sleep(sleep_step)
         
         # Voice Synthesis Step
+        if check_cancelled():
+            return
         update_db(25, "Voice Synthesis", "Voice Synthesis", f"Starting Voice Synthesis using voice: '{voice_name}' (Provider: {tts_provider})")
         
         wav_path = os.path.join(STATIC_DIR, f"audio_{task_id}.wav")
@@ -627,6 +675,8 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                         pass
             
         # ─── Local AI Music Generation + Audio Ducking ────────────────────────────
+        if check_cancelled():
+            return
         # Runs for all providers but only if local benchmark python is available.
         mixed_audio_path = None
         if os.path.exists(wav_path) and audio_duration:
@@ -738,8 +788,9 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         subtitle_fontsize = config.get("subtitle_fontsize", 24)
         
         subtitle_color = hex_to_rgb(subtitle_color_hex)
-
         # ─── Local AI Image Generation (SDXL Turbo) per scene ────────────────────
+        if check_cancelled():
+            return
         ai_scene_clips = []
         if is_local:
             try:
@@ -834,6 +885,8 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                 update_db(60, "Sourcing Media", "Sourcing Media", "Pexels key not configured. Using slideshow generator.")
             
         # Rendering Video step
+        if check_cancelled():
+            return
         update_db(70, "Rendering Video", "Rendering Video", "Composing video timeline...")
         
         # Split script into paragraphs for slideshow/overlays
@@ -1135,6 +1188,138 @@ def get_all_tasks():
 @app.get("/api/v1/tasks/{task_id}")
 def get_task(task_id: str):
     return get_task_status_db(task_id)
+
+@app.post("/api/v1/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    try:
+        conn = get_db_conn()
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SELECT status, logs FROM tasks WHERE id = %s", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        current_status = row[0]
+        logs_data = row[1]
+        if isinstance(logs_data, str):
+            logs_data = json.loads(logs_data)
+        elif logs_data is None:
+            logs_data = []
+
+        if current_status.lower() in ["completed", "failed", "cancelled"]:
+            cur.close()
+            conn.close()
+            return {"status": "ok", "message": f"Task is already {current_status}"}
+
+        # Log the cancellation
+        log_time = datetime.now()
+        logs_data.append(f"[{log_time.strftime('%Y-%m-%d %H:%M:%S')}] [Cancellation] Task cancelled by user.")
+        
+        cur.execute(
+            "UPDATE tasks SET status = 'cancelled', logs = %s WHERE id = %s",
+            (json.dumps(logs_data), task_id)
+        )
+        cur.close()
+        conn.close()
+        return {"status": "ok", "message": "Task cancelled successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error cancelling task: {e}")
+        raise HTTPException(status_code=500, detail="Database update error")
+
+@app.delete("/api/v1/tasks/{task_id}")
+def delete_task(task_id: str):
+    try:
+        conn = get_db_conn()
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM tasks WHERE id = %s", (task_id,))
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
+        cur.execute("DELETE FROM videos WHERE id = %s", (task_id,))
+        cur.close()
+        conn.close()
+
+        cleanup_task_files(task_id)
+        return {"status": "ok", "message": "Task and associated files deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting task: {e}")
+        raise HTTPException(status_code=500, detail="Database delete error")
+
+@app.post("/api/v1/tasks/{task_id}/resume")
+def resume_task(task_id: str):
+    try:
+        conn = get_db_conn()
+        conn.autocommit = True
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM tasks WHERE id = %s", (task_id,))
+        task = cur.fetchone()
+        if not task:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        current_status = task["status"].lower() if task["status"] else ""
+        if current_status not in ["cancelled", "failed"]:
+            cur.close()
+            conn.close()
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Only cancelled or failed tasks can be resumed. Current status: {task['status']}"
+            )
+
+        log_time = datetime.now()
+        logs_data = task["logs"]
+        if isinstance(logs_data, str):
+            logs_data = json.loads(logs_data)
+        elif logs_data is None:
+            logs_data = []
+        
+        logs_data.append(f"[{log_time.strftime('%Y-%m-%d %H:%M:%S')}] [System] Resuming task... Progress reset to 0.")
+        
+        cur.execute(
+            "UPDATE tasks SET status = 'processing', progress = 0, step = 'LLM Scripting', logs = %s WHERE id = %s",
+            (json.dumps(logs_data), task_id)
+        )
+        cur.close()
+        conn.close()
+
+        cleanup_task_files(task_id)
+
+        config = load_config()
+        tts_provider = config.get("tts_provider", "edge-tts")
+
+        threading.Thread(
+            target=process_task_background,
+            args=(
+                task_id, 
+                task["subject"], 
+                task["aspect_ratio"], 
+                task["voice_name"], 
+                task["language"], 
+                task["paragraph_number"], 
+                task["duration_seconds"], 
+                tts_provider
+            ),
+            daemon=True
+        ).start()
+
+        return {"status": "ok", "message": "Task resumed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error resuming task: {e}")
+        raise HTTPException(status_code=500, detail="Database update error")
 
 @app.get("/api/v1/videos")
 def get_videos():

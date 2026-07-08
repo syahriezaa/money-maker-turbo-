@@ -15,7 +15,7 @@ import TasksList from './components/TasksList';
 import MediaLibrary from './components/MediaLibrary';
 import Settings from './components/Settings';
 import CustomPlayer from './components/CustomPlayer';
-import { getVideos, createVideoTask, getTaskStatus, getTasks } from './api';
+import { getVideos, createVideoTask, getTaskStatus, getTasks, cancelTask, deleteTask, resumeTask } from './api';
 import './App.css';
 
 export default function App() {
@@ -145,6 +145,49 @@ export default function App() {
     }));
     localStorage.setItem("active_task_id", taskStatus.task_id);
     setActiveTab("tasks"); // Switch to tasks list
+  };
+
+  const handleCancelTask = async (taskId) => {
+    try {
+      await cancelTask(taskId);
+      const status = await getTaskStatus(taskId);
+      setTasks(prev => ({
+        ...prev,
+        [taskId]: status
+      }));
+    } catch (err) {
+      console.error("Failed to cancel task:", err);
+      alert("Failed to cancel task: " + err.message);
+    }
+  };
+
+  const handleDeleteTask = async (taskId) => {
+    try {
+      await deleteTask(taskId);
+      setTasks(prev => {
+        const copy = { ...prev };
+        delete copy[taskId];
+        return copy;
+      });
+      loadVideos();
+    } catch (err) {
+      console.error("Failed to delete task:", err);
+      alert("Failed to delete task: " + err.message);
+    }
+  };
+
+  const handleResumeTask = async (taskId) => {
+    try {
+      await resumeTask(taskId);
+      const status = await getTaskStatus(taskId);
+      setTasks(prev => ({
+        ...prev,
+        [taskId]: status
+      }));
+    } catch (err) {
+      console.error("Failed to resume task:", err);
+      alert("Failed to resume task: " + err.message);
+    }
   };
 
   // Count active tasks
@@ -290,7 +333,12 @@ export default function App() {
         )}
 
         {activeTab === 'tasks' && (
-          <TasksList tasks={tasks} />
+          <TasksList 
+            tasks={tasks} 
+            onCancelTask={handleCancelTask}
+            onDeleteTask={handleDeleteTask}
+            onResumeTask={handleResumeTask}
+          />
         )}
 
         {activeTab === 'media' && (

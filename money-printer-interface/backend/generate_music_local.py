@@ -18,14 +18,17 @@ def main():
     output_path = sys.argv[2]
     duration = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Prompt: '{prompt}'")
     print(f"Duration: {duration} seconds")
     
     print("Loading MusicGen model (facebook/musicgen-small)...")
     processor = AutoProcessor.from_pretrained("facebook/musicgen-small")
-    model = MusicgenForConditionalGeneration.from_pretrained("facebook/musicgen-small")
+    model_kwargs = {}
+    if device == "mps":
+        model_kwargs["attn_implementation"] = "eager"
+    model = MusicgenForConditionalGeneration.from_pretrained("facebook/musicgen-small", **model_kwargs)
     model.to(device)
     
     inputs = processor(

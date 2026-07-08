@@ -18,7 +18,7 @@ def main():
     output_path = sys.argv[2]
     language = sys.argv[3].lower() if len(sys.argv) > 3 else "en"
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Target language: '{language}'")
     
@@ -54,7 +54,7 @@ def main():
             model = ChatterboxTurboTTS.from_pretrained(device=device)
         except Exception as e:
             print(f"Failed to load standard ChatterboxTurboTTS model on {device}: {e}")
-            if device == "cuda":
+            if device in ["cuda", "mps"]:
                 print("Retrying on CPU...")
                 try:
                     model = ChatterboxTurboTTS.from_pretrained(device="cpu")

@@ -7,9 +7,11 @@ from contextlib import nullcontext
 import torch
 from PIL import Image
 
-# Redirect all Hugging Face downloads to D: drive because C: drive is out of disk space
-os.environ["HF_HOME"] = r"D:\huggingface_cache"
-os.environ["HF_HUB_CACHE"] = r"D:\huggingface_cache"
+# Redirect all Hugging Face downloads to D: drive on Windows if D: drive is available, otherwise use default
+if sys.platform.startswith("win32") and os.path.exists("D:\\"):
+    os.environ["HF_HOME"] = r"D:\huggingface_cache"
+    os.environ["HF_HUB_CACHE"] = r"D:\huggingface_cache"
+
 
 # Clean no_proxy to avoid HTTPX IPv6 port parsing crash
 if "no_proxy" in os.environ:
@@ -335,9 +337,14 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
                 print(f"[Override] {k} -> {v}")
                 params[k] = v
                 
-    # Detect device
+    # Detect device (check MPS for Apple Silicon, then CUDA, then CPU)
     if not device:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
     print(f"[Device] Running on: {device}")
     
     # Apply CPU-specific thread configuration early to reduce context switching overhead
@@ -350,13 +357,15 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
     backend_dir = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.dirname(backend_dir)
     
+    dtype = torch.float32 if device in ["cpu", "mps"] else torch.float16
+    
     # Load CLIPTextModel first to solve single checkpoint loading bugs offline/online
     text_encoder = None
     try:
         print("[Loader] Attempting to load CLIPTextModel from local cache first...")
         text_encoder = CLIPTextModel.from_pretrained(
             "openai/clip-vit-large-patch14",
-            torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+            torch_dtype=dtype,
             local_files_only=True
         )
     except Exception as e:
@@ -364,7 +373,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         try:
             text_encoder = CLIPTextModel.from_pretrained(
                 "openai/clip-vit-large-patch14",
-                torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+                torch_dtype=dtype,
                 local_files_only=False
             )
         except Exception as online_e:
@@ -379,7 +388,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         try:
             load_kwargs = {
                 "use_safetensors": True,
-                "torch_dtype": torch.float32 if device == "cpu" else torch.float16,
+                "torch_dtype": dtype,
             }
             if text_encoder is not None:
                 load_kwargs["text_encoder"] = text_encoder
@@ -393,20 +402,28 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         except Exception as e:
             print(f"[Warning] Failed to load checkpoint {ckpt_path}: {e}")
             
-    if pipe is None:
-        # Check if local fully cached Dreamshaper model exists
+        hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+        # Check both direct subfolder and hub subfolder formats
         dreamshaper_local = os.path.join(
-            os.environ.get("HF_HOME", r"D:\huggingface_cache"),
+            hf_home,
             "models--Lykon--dreamshaper-8",
             "snapshots",
             "a7e52b98680b1ba8ff7bce97c7f9f2e2e5337917"
         )
+        if not os.path.exists(dreamshaper_local):
+            dreamshaper_local = os.path.join(
+                hf_home,
+                "hub",
+                "models--Lykon--dreamshaper-8",
+                "snapshots",
+                "a7e52b98680b1ba8ff7bce97c7f9f2e2e5337917"
+            )
         if os.path.exists(dreamshaper_local):
             print(f"[Loader] Detected fully cached local Dreamshaper model at {dreamshaper_local}. Loading offline...")
             try:
                 pipe = StableDiffusionPipeline.from_pretrained(
                     dreamshaper_local,
-                    torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+                    torch_dtype=dtype,
                     safety_checker=None,
                     local_files_only=True
                 )
@@ -419,7 +436,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
             print("[Loader] Attempting to load runwayml/stable-diffusion-v1-5 from local cache...")
             pipe = StableDiffusionPipeline.from_pretrained(
                 "runwayml/stable-diffusion-v1-5",
-                torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+                torch_dtype=dtype,
                 safety_checker=None,
                 local_files_only=True
             )
@@ -428,7 +445,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
             try:
                 pipe = StableDiffusionPipeline.from_pretrained(
                     "runwayml/stable-diffusion-v1-5",
-                    torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+                    torch_dtype=dtype,
                     safety_checker=None,
                     local_files_only=False
                 )
@@ -495,6 +512,8 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         autocast_ctx = torch.cpu.amp.autocast(enabled=True, dtype=torch.bfloat16)
     elif device == "cuda":
         autocast_ctx = torch.cuda.amp.autocast(enabled=True, dtype=torch.float16)
+    elif device == "mps":
+        autocast_ctx = nullcontext()
     else:
         autocast_ctx = nullcontext()
         
@@ -514,7 +533,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
     
     # Move latents to device if not CPU
     if device != "cpu":
-        latents = latents.to(device, dtype=torch.float16)
+        latents = latents.to(device, dtype=dtype)
         
     # Setup cross attention scale for LoRA
     cross_attention_kwargs = {}
