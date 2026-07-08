@@ -70,7 +70,7 @@ def main():
             device = "cpu"
 
     # Style suffix for positive prompt
-    style_suffix = ", high quality anime illustration, masterwork, masterpiece, cell shading, flat colors, clean outlines"
+    style_suffix = ", gtav style, high quality anime illustration, masterwork, masterpiece, cell shading, flat colors, clean outlines"
     full_positive_prompt = args.prompt + style_suffix
     negative_prompt = args.negative_prompt if args.negative_prompt else "low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature"
 

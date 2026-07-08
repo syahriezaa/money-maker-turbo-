@@ -452,28 +452,45 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
             except Exception as e:
                 print(f"[Warning] Failed to load Dreamshaper from local path: {e}")
                 
+    is_lcm_active = False
     if pipe is None:
-        print("[Loader] Falling back to standard public model runwayml/stable-diffusion-v1-5...")
+        print("[Loader] Falling back to public GTA V Artwork Diffusion model (ItsJayQz/GTA5_Artwork_Diffusion)...")
+        fallback_model = "ItsJayQz/GTA5_Artwork_Diffusion"
         try:
-            print("[Loader] Attempting to load runwayml/stable-diffusion-v1-5 from local cache...")
+            print(f"[Loader] Attempting to load {fallback_model} from local cache...")
             pipe = StableDiffusionPipeline.from_pretrained(
-                "runwayml/stable-diffusion-v1-5",
+                fallback_model,
                 torch_dtype=dtype,
                 safety_checker=None,
                 local_files_only=True
             )
+            is_lcm_active = True
         except Exception as cache_e:
-            print(f"[Loader] Local runwayml/stable-diffusion-v1-5 load failed, trying online: {cache_e}")
+            print(f"[Loader] Local cache load failed, trying online: {cache_e}")
             try:
                 pipe = StableDiffusionPipeline.from_pretrained(
-                    "runwayml/stable-diffusion-v1-5",
+                    fallback_model,
                     torch_dtype=dtype,
                     safety_checker=None,
                     local_files_only=False
                 )
+                is_lcm_active = True
             except Exception as fallback_e:
                 print(f"[Error] Fallback loading failed: {fallback_e}")
                 sys.exit(1)
+
+    if is_lcm_active:
+        print("[Loader] Activating LCM LoRA acceleration (latent-consistency/lcm-lora-sdv1-5)...")
+        try:
+            from diffusers import LCMScheduler
+            pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
+            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+            # Force parameters for LCM compatibility
+            params["steps"] = 4
+            params["cfg"] = 1.0
+            print("[Loader] LCM configuration loaded successfully. Forced steps=4, guidance_scale=1.0.")
+        except Exception as lcm_e:
+            print(f"[Warning] Failed to load LCM LoRA: {lcm_e}. Proceeding with standard generation.")
             
     # Load LoRAs if specified
     lora_scale = 1.0
