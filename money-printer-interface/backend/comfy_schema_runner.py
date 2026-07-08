@@ -566,6 +566,24 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
     # Run pipeline inside the optimized autocast context
     print(f"[Inference] Executing pipeline. Steps: {params['steps']}, Guidance: {params['cfg']}")
     start_time = time.time()
+    import sys
+    sd_start_time = [time.time()]
+    def diffusers_progress_callback(step, timestep, latents):
+        total_steps = params["steps"]
+        pct = int((step + 1) / total_steps * 100)
+        elapsed = time.time() - sd_start_time[0]
+        speed = (step + 1) / elapsed if elapsed > 0 else 0
+        remaining = max(0, total_steps - (step + 1))
+        eta = int(remaining / speed) if speed > 0 else 0
+        bar_len = 10
+        filled = int(bar_len * (step + 1) / total_steps)
+        bar = '█' * filled + '░' * (bar_len - filled)
+        sys.stdout.write(
+            f"\r {pct:3d}%|{bar}| {step + 1}/{total_steps} "
+            f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}<{eta//60:02d}:{eta%60:02d}, {speed:.2f}it/s]"
+        )
+        sys.stdout.flush()
+
     with autocast_ctx:
         pipeline_output = pipe(
             prompt=params["positive_prompt"],
@@ -574,8 +592,11 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
             guidance_scale=params["cfg"],
             latents=latents,
             generator=generator,
-            cross_attention_kwargs=cross_attention_kwargs
+            cross_attention_kwargs=cross_attention_kwargs,
+            callback=diffusers_progress_callback,
+            callback_steps=1
         )
+    print()  # Print newline after tqdm completes
     elapsed = time.time() - start_time
     print(f"[Inference] Finished in {elapsed:.2f} seconds.")
     

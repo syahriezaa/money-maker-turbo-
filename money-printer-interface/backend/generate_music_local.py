@@ -72,10 +72,18 @@ def main():
         # Print newline setelah selesai
         print()
 
-    # Hook ke generate untuk track token
-    class ProgressCallback(torch.nn.Module):
-        pass
+    from transformers import LogitsProcessor, LogitsProcessorList
 
+    class ProgressLogitsProcessor(LogitsProcessor):
+        def __init__(self, token_counter):
+            self.token_counter = token_counter
+            self.count = 0
+        def __call__(self, input_ids, scores):
+            self.count += 1
+            self.token_counter[0] = self.count
+            return scores
+
+    proc = ProgressLogitsProcessor(generated_tokens)
     reporter_thread = threading.Thread(target=progress_reporter, daemon=True)
     reporter_thread.start()
 
@@ -85,6 +93,7 @@ def main():
             result = model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
+                logits_processor=LogitsProcessorList([proc])
             )
             generated_tokens[0] = result.shape[-1]
     finally:
