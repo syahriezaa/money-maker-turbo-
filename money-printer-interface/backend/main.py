@@ -569,46 +569,65 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
 
     def run_subprocess_with_progress(cmd: list, phase: str, segment: int = None, total_segments: int = None) -> tuple:
         """
-        Jalankan subprocess dan baca stdout line-by-line untuk mem-parse
-        output tqdm progress. Setiap match akan memanggil update_sub_progress.
+        Jalankan subprocess dan baca output per-chunk (bukan per-baris) agar
+        tqdm yang menggunakan \\r (carriage return) dapat di-parse secara real-time.
 
         Returns:
             tuple: (stdout_combined: str, returncode: int)
         """
-        stdout_lines = []
+        import time as _time
+        all_output = []
+        last_db_write = 0.0  # throttle: max 1x update per detik
+
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # gabung stderr ke stdout agar tqdm terbaca
                 text=True,
-                bufsize=1  # line-buffered
+                bufsize=0  # unbuffered — terima data sesegera mungkin
             )
-            for line in proc.stdout:
-                stdout_lines.append(line)
-                m = TQDM_RE.search(line)
-                if m:
-                    pct = float(m.group(1))
-                    step_val = int(m.group(2))
-                    total_steps = int(m.group(3))
-                    speed = float(m.group(4))
-                    remaining = total_steps - step_val
-                    eta_seconds = int(remaining / speed) if speed > 0 else None
-                    update_sub_progress({
-                        "phase": phase,
-                        "segment": segment,
-                        "total_segments": total_segments,
-                        "pct": pct,
-                        "step": step_val,
-                        "total_steps": total_steps,
-                        "speed": speed,
-                        "eta_seconds": max(0, eta_seconds) if eta_seconds is not None else None
-                    })
+            partial = ""
+            while True:
+                chunk = proc.stdout.read(256)
+                if not chunk:
+                    break
+                all_output.append(chunk)
+                partial += chunk
+                # Split pada \r atau \n — tqdm pakai \r, log normal pakai \n
+                segments_raw = partial.replace('\r', '\n').split('\n')
+                partial = segments_raw[-1]  # simpan sisa yang belum lengkap
+                for seg in segments_raw[:-1]:
+                    seg = seg.strip()
+                    if not seg:
+                        continue
+                    m = TQDM_RE.search(seg)
+                    if m:
+                        now = _time.time()
+                        if now - last_db_write >= 1.0:  # throttle 1 detik
+                            last_db_write = now
+                            pct = float(m.group(1))
+                            step_val = int(m.group(2))
+                            total_steps = int(m.group(3))
+                            speed = float(m.group(4))
+                            remaining = total_steps - step_val
+                            eta_seconds = int(remaining / speed) if speed > 0 else None
+                            update_sub_progress({
+                                "phase": phase,
+                                "segment": segment,
+                                "total_segments": total_segments,
+                                "pct": pct,
+                                "step": step_val,
+                                "total_steps": total_steps,
+                                "speed": speed,
+                                "eta_seconds": max(0, eta_seconds) if eta_seconds is not None else None
+                            })
             proc.wait()
-            return "".join(stdout_lines), proc.returncode
+            return "".join(all_output), proc.returncode
         except Exception as e:
             print(f"run_subprocess_with_progress error: {e}")
             return "", 1
+
             
     def check_cancelled():
         try:

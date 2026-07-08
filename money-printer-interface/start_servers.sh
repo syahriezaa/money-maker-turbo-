@@ -30,13 +30,17 @@ source "$BACKEND_DIR/.venv/bin/activate"
 if command -v uv &> /dev/null; then
     echo "Installing/verifying backend dependencies using uv..."
     uv pip install --python "$BACKEND_DIR/.venv" -r "$BACKEND_DIR/requirements.txt"
-    uv pip install --python "$BACKEND_DIR/.venv" psycopg2-binary Pillow numpy moviepy edge-tts chatterbox-tts torch torchaudio transformers diffusers
+    # Install numpy first — required as build dependency for pkuseg (via chatterbox-tts)
+    uv pip install --python "$BACKEND_DIR/.venv" numpy
+    uv pip install --python "$BACKEND_DIR/.venv" psycopg2-binary Pillow moviepy edge-tts torch torchaudio transformers diffusers
+    uv pip install --python "$BACKEND_DIR/.venv" chatterbox-tts --no-build-isolation
 else
     echo "Installing/verifying backend dependencies using pip..."
     python3 -m pip install --upgrade pip
     pip install -r "$BACKEND_DIR/requirements.txt"
     pip install numpy
-    pip install psycopg2-binary Pillow moviepy edge-tts chatterbox-tts torch torchaudio transformers diffusers
+    pip install psycopg2-binary Pillow moviepy edge-tts torch torchaudio transformers diffusers
+    pip install chatterbox-tts --no-build-isolation
 fi
 
 echo "[3/3] Checking frontend dependencies..."
