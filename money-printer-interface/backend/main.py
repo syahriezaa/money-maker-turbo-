@@ -818,72 +818,99 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                 music_result = _MusicResult(music_returncode, music_stdout)
                 if music_result.returncode == 0 and os.path.exists(raw_music_path):
                     update_db(49, "AI Music", "AI Music", "Music generated. Ducking audio levels dynamically...")
-                    # Dynamic audio ducking: mix voiceover (70%) + background music (duck to 30% during speech, 70% silent)
-                    import torchaudio
-                    import torch as _torch
+                    import numpy as np
+                    from scipy.io.wavfile import read as wav_read, write as wav_write
 
-                    vo_waveform, vo_sr = torchaudio.load(wav_path)
-                    mu_waveform, mu_sr = torchaudio.load(raw_music_path)
+                    # Load audio files
+                    vo_sr, vo_data = wav_read(wav_path)
+                    mu_sr, mu_data = wav_read(raw_music_path)
 
-                    # Resample music to match voiceover sample rate if needed
+                    # Convert to float32 normalized to [-1.0, 1.0] if they are int16
+                    if vo_data.dtype == np.int16:
+                        vo_data = vo_data.astype(np.float32) / 32768.0
+                    else:
+                        vo_data = vo_data.astype(np.float32)
+
+                    if mu_data.dtype == np.int16:
+                        mu_data = mu_data.astype(np.float32) / 32768.0
+                    else:
+                        mu_data = mu_data.astype(np.float32)
+
+                    # Make mono by averaging channels
+                    if len(vo_data.shape) > 1:
+                        vo_mono = vo_data.mean(axis=1)
+                    else:
+                        vo_mono = vo_data
+
+                    if len(mu_data.shape) > 1:
+                        mu_mono = mu_data.mean(axis=1)
+                    else:
+                        mu_mono = mu_data
+
+                    # Resample music using linear interpolation if needed
                     if mu_sr != vo_sr:
-                        mu_waveform = torchaudio.functional.resample(mu_waveform, mu_sr, vo_sr)
+                        num_samples = int(len(mu_mono) * vo_sr / mu_sr)
+                        mu_mono = np.interp(
+                            np.linspace(0, len(mu_mono), num_samples, endpoint=False),
+                            np.arange(len(mu_mono)),
+                            mu_mono
+                        )
 
-                    # Make mono then stereo
-                    vo_mono = vo_waveform.mean(dim=0, keepdim=True)
-                    mu_mono = mu_waveform.mean(dim=0, keepdim=True)
-
-                    # Normalize music
-                    mu_peak = mu_mono.abs().max()
-                    if mu_peak > 0:
-                        mu_mono = mu_mono / mu_peak * 0.85
-
-                    # Normalize voiceover
-                    vo_peak = vo_mono.abs().max()
+                    # Normalize peaks to 0.85
+                    vo_peak = np.abs(vo_mono).max()
                     if vo_peak > 0:
                         vo_mono = vo_mono / vo_peak * 0.85
 
+                    mu_peak = np.abs(mu_mono).max()
+                    if mu_peak > 0:
+                        mu_mono = mu_mono / mu_peak * 0.85
+
                     # Loop or trim music to match voiceover length
-                    vo_len = vo_mono.shape[-1]
-                    if mu_mono.shape[-1] < vo_len:
-                        repeats = (vo_len // mu_mono.shape[-1]) + 1
-                        mu_mono = mu_mono.repeat(1, repeats)
-                    mu_mono = mu_mono[..., :vo_len]
+                    vo_len = len(vo_mono)
+                    if len(mu_mono) < vo_len:
+                        repeats = (vo_len // len(mu_mono)) + 1
+                        mu_mono = np.tile(mu_mono, repeats)
+                    mu_mono = mu_mono[:vo_len]
 
                     # VAD envelope: compute rolling RMS of voiceover
                     window = vo_sr // 10  # 100ms window
-                    pad = _torch.zeros(1, window // 2)
-                    vo_padded = _torch.cat([pad, vo_mono, pad], dim=-1)
-                    frames = vo_padded.unfold(-1, window, window // 4)
-                    rms = frames.pow(2).mean(-1).sqrt().squeeze(0)  # shape: [T]
+                    hop = window // 4
+                    rms_len = (vo_len + hop - 1) // hop
+                    rms = np.zeros(rms_len, dtype=np.float32)
+                    
+                    for i in range(rms_len):
+                        start_idx = max(0, i * hop - window // 2)
+                        end_idx = min(vo_len, i * hop + window // 2)
+                        segment = vo_mono[start_idx:end_idx]
+                        if len(segment) > 0:
+                            rms[i] = np.sqrt(np.mean(segment ** 2))
 
                     # Build sample-level duck mask
-                    hop = window // 4
-                    duck_mask = _torch.zeros(vo_len)
+                    duck_mask = np.zeros(vo_len, dtype=np.float32)
                     for i, r in enumerate(rms):
-                        start = i * hop
-                        end = min(start + hop, vo_len)
-                        # High RMS = speech, duck music to 30%; silence = raise to 70%
+                        start_idx = i * hop
+                        end_idx = min(start_idx + hop, vo_len)
                         duck_level = 0.30 if r > 0.01 else 0.70
-                        duck_mask[start:end] = duck_level
+                        duck_mask[start_idx:end_idx] = duck_level
 
-                    # Smooth duck mask
+                    # Smooth duck mask with moving average
                     smooth_w = vo_sr // 5  # 200ms
-                    kernel = _torch.ones(1, 1, smooth_w) / smooth_w
-                    duck_mask_smooth = _torch.nn.functional.conv1d(
-                        duck_mask.unsqueeze(0).unsqueeze(0),
-                        kernel,
-                        padding=smooth_w // 2
-                    ).squeeze()[..., :vo_len]
+                    if smooth_w > 1:
+                        kernel = np.ones(smooth_w) / smooth_w
+                        duck_mask_smooth = np.convolve(duck_mask, kernel, mode='same')
+                    else:
+                        duck_mask_smooth = duck_mask
 
                     ducked_music = mu_mono * duck_mask_smooth
                     mixed = vo_mono * 0.70 + ducked_music
+                    mixed = np.clip(mixed, -1.0, 1.0)
 
-                    # Clip to [-1, 1] and save
-                    mixed = mixed.clamp(-1.0, 1.0)
-                    mixed_stereo = mixed.repeat(2, 1)
+                    # Save as stereo int16 wav file (which is standard and compatible)
+                    mixed_stereo = np.column_stack((mixed, mixed))
+                    mixed_stereo_int16 = (mixed_stereo * 32767.0).astype(np.int16)
+
                     mixed_audio_path = os.path.join(STATIC_DIR, f"mixed_{task_id}.wav")
-                    torchaudio.save(mixed_audio_path, mixed_stereo, vo_sr)
+                    wav_write(mixed_audio_path, vo_sr, mixed_stereo_int16)
                     update_db(50, "AI Music", "AI Music", "Background music mixed with voiceover (smart ducking applied).")
                     # Clean up raw music file
                     try:
