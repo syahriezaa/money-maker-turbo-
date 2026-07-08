@@ -102,11 +102,13 @@ export default function App() {
           const status = await getTaskStatus(id);
           
           // Check if changed
+          const subProgressChanged = JSON.stringify(status.sub_progress) !== JSON.stringify(updatedTasks[id].sub_progress);
           if (
             status.status !== updatedTasks[id].status ||
             status.progress !== updatedTasks[id].progress ||
             status.logs.length !== updatedTasks[id].logs.length ||
-            status.step !== updatedTasks[id].step
+            status.step !== updatedTasks[id].step ||
+            subProgressChanged
           ) {
             updatedTasks[id] = status;
             hasChanges = true;
