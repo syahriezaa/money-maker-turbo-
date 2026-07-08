@@ -39,6 +39,7 @@ try:
     import diffusers.models.lora as lora
     from torch import nn
     original_text_encoder_attn_modules = lora.text_encoder_attn_modules
+    original_text_encoder_mlp_modules = lora.text_encoder_mlp_modules
 
     def patched_text_encoder_attn_modules(text_encoder: nn.Module):
         # If the text encoder exposes its encoder directly (transformers 5.x)
@@ -61,8 +62,29 @@ try:
                 return attn_modules
             raise
 
+    def patched_text_encoder_mlp_modules(text_encoder: nn.Module):
+        if hasattr(text_encoder, "encoder") and not hasattr(text_encoder, "text_model"):
+            mlp_modules = []
+            for i, layer in enumerate(text_encoder.encoder.layers):
+                name = f"text_model.encoder.layers.{i}.mlp"
+                mod = layer.mlp
+                mlp_modules.append((name, mod))
+            return mlp_modules
+        try:
+            return original_text_encoder_mlp_modules(text_encoder)
+        except AttributeError:
+            if hasattr(text_encoder, "encoder"):
+                mlp_modules = []
+                for i, layer in enumerate(text_encoder.encoder.layers):
+                    name = f"text_model.encoder.layers.{i}.mlp"
+                    mod = layer.mlp
+                    mlp_modules.append((name, mod))
+                return mlp_modules
+            raise
+
     lora.text_encoder_attn_modules = patched_text_encoder_attn_modules
-    print("[Patch] Patched diffusers.models.lora.text_encoder_attn_modules for transformers 5.x compatibility.")
+    lora.text_encoder_mlp_modules = patched_text_encoder_mlp_modules
+    print("[Patch] Patched diffusers.models.lora.text_encoder_attn_modules and text_encoder_mlp_modules for transformers 5.x compatibility.")
 except Exception as patch_e:
     print(f"[Warning] Failed to apply transformers 5.x compatibility patch: {patch_e}")
 
