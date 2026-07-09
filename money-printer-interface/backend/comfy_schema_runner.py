@@ -452,7 +452,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
             except Exception as e:
                 print(f"[Warning] Failed to load Dreamshaper from local path: {e}")
                 
-    is_lcm_active = False
+    is_gta_fallback = False
     if pipe is None:
         print("[Loader] Falling back to public GTA V Artwork Diffusion model (ItsJayQz/GTA5_Artwork_Diffusion)...")
         fallback_model = "ItsJayQz/GTA5_Artwork_Diffusion"
@@ -464,7 +464,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
                 safety_checker=None,
                 local_files_only=True
             )
-            is_lcm_active = True
+            is_gta_fallback = True
         except Exception as cache_e:
             print(f"[Loader] Local cache load failed, trying online: {cache_e}")
             try:
@@ -474,23 +474,16 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
                     safety_checker=None,
                     local_files_only=False
                 )
-                is_lcm_active = True
+                is_gta_fallback = True
             except Exception as fallback_e:
                 print(f"[Error] Fallback loading failed: {fallback_e}")
                 sys.exit(1)
 
-    if is_lcm_active:
-        print("[Loader] Activating LCM LoRA acceleration (latent-consistency/lcm-lora-sdv1-5)...")
-        try:
-            from diffusers import LCMScheduler
-            pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
-            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-            # Force parameters for LCM compatibility
-            params["steps"] = 4
-            params["cfg"] = 1.0
-            print("[Loader] LCM configuration loaded successfully. Forced steps=4, guidance_scale=1.0.")
-        except Exception as lcm_e:
-            print(f"[Warning] Failed to load LCM LoRA: {lcm_e}. Proceeding with standard generation.")
+    if is_gta_fallback:
+        # Optimize steps for speed (12 steps instead of 20) and force guidance scale to 7.5
+        params["steps"] = 12
+        params["cfg"] = 7.5
+        print("[Loader] GTA V Fallback configuration loaded. Forced steps=12, guidance_scale=7.5 for hand-drawn outlines.")
             
     # Load LoRAs if specified
     lora_scale = 1.0

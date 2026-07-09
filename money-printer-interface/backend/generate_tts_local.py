@@ -209,6 +209,8 @@ def main():
                 wav_cpu = wav.cpu()
                 wav_items.append(wav_cpu)
                 del wav
+                import gc
+                gc.collect()
                 if device == "mps":
                     try:
                         torch.mps.empty_cache()

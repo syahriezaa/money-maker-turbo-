@@ -70,9 +70,9 @@ def main():
             device = "cpu"
 
     # Style suffix for positive prompt
-    style_suffix = ", gtav style, high quality anime illustration, masterwork, masterpiece, cell shading, flat colors, clean outlines"
+    style_suffix = ", gtav style, bold black ink outlines, flat cell shading, clean outlines, high contrast, comic book artwork, loading screen illustration"
     full_positive_prompt = args.prompt + style_suffix
-    negative_prompt = args.negative_prompt if args.negative_prompt else "low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature"
+    negative_prompt = args.negative_prompt if args.negative_prompt else "low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature, photorealistic, realistic, 3d render, soft shading, gradient shading, outline-free"
 
     # Dynamically construct the ComfyUI workflow JSON schema
     workflow = {
