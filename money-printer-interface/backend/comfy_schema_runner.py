@@ -424,66 +424,44 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         except Exception as e:
             print(f"[Warning] Failed to load checkpoint {ckpt_path}: {e}")
             
-        hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
-        # Check both direct subfolder and hub subfolder formats
-        dreamshaper_local = os.path.join(
-            hf_home,
-            "models--Lykon--dreamshaper-8",
-            "snapshots",
-            "a7e52b98680b1ba8ff7bce97c7f9f2e2e5337917"
-        )
-        if not os.path.exists(dreamshaper_local):
-            dreamshaper_local = os.path.join(
-                hf_home,
-                "hub",
-                "models--Lykon--dreamshaper-8",
-                "snapshots",
-                "a7e52b98680b1ba8ff7bce97c7f9f2e2e5337917"
-            )
-        if os.path.exists(dreamshaper_local):
-            print(f"[Loader] Detected fully cached local Dreamshaper model at {dreamshaper_local}. Loading offline...")
-            try:
-                pipe = StableDiffusionPipeline.from_pretrained(
-                    dreamshaper_local,
-                    torch_dtype=dtype,
-                    safety_checker=None,
-                    local_files_only=True
-                )
-            except Exception as e:
-                print(f"[Warning] Failed to load Dreamshaper from local path: {e}")
-                
-    is_gta_fallback = False
-    if pipe is None:
-        print("[Loader] Falling back to public GTA V Artwork Diffusion model (ItsJayQz/GTA5_Artwork_Diffusion)...")
-        fallback_model = "ItsJayQz/GTA5_Artwork_Diffusion"
+        target_hf_model = "ItsJayQz/GTA5_Artwork_Diffusion"
+        ckpt_lower = params["ckpt_name"].lower() if params.get("ckpt_name") else ""
+        if "anything" in ckpt_lower:
+            target_hf_model = "stablediffusionapi/anything-v5"
+        elif "dreamshaper" in ckpt_lower:
+            target_hf_model = "Lykon/DreamShaper"
+        elif "disney-pixar" in ckpt_lower:
+            target_hf_model = "stablediffusionapi/disney-pixar-cartoon"
+            
+        print(f"[Loader] Target style model mapped to: {target_hf_model}")
+        
         try:
-            print(f"[Loader] Attempting to load {fallback_model} from local cache...")
+            print(f"[Loader] Attempting to load {target_hf_model} from local Hugging Face cache...")
             pipe = StableDiffusionPipeline.from_pretrained(
-                fallback_model,
+                target_hf_model,
                 torch_dtype=dtype,
                 safety_checker=None,
                 local_files_only=True
             )
-            is_gta_fallback = True
+            print("[Loader] Loaded successfully from local cache.")
         except Exception as cache_e:
-            print(f"[Loader] Local cache load failed, trying online: {cache_e}")
+            print(f"[Loader] Local cache load failed, trying online download: {cache_e}")
             try:
                 pipe = StableDiffusionPipeline.from_pretrained(
-                    fallback_model,
+                    target_hf_model,
                     torch_dtype=dtype,
                     safety_checker=None,
                     local_files_only=False
                 )
-                is_gta_fallback = True
-            except Exception as fallback_e:
-                print(f"[Error] Fallback loading failed: {fallback_e}")
+                print("[Loader] Loaded successfully from Hugging Face online.")
+            except Exception as online_e:
+                print(f"[Error] Failed to load pipeline online: {online_e}")
                 sys.exit(1)
 
-    if is_gta_fallback:
-        # Optimize steps for speed (12 steps instead of 20) and force guidance scale to 7.5
+        # Optimize steps and CFG scale for high-speed & high-quality outlines
         params["steps"] = 12
         params["cfg"] = 7.5
-        print("[Loader] GTA V Fallback configuration loaded. Forced steps=12, guidance_scale=7.5 for hand-drawn outlines.")
+        print(f"[Loader] Optimized parameters locked: steps=12, guidance_scale=7.5 for {target_hf_model}.")
             
     # Load LoRAs if specified
     lora_scale = 1.0

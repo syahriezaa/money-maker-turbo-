@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--seed", type=int, default=1337, help="Seed.")
     parser.add_argument("--negative-prompt", type=str, default=None, help="Negative prompt.")
     parser.add_argument("--device", type=str, default=None, help="Device to run on (e.g. cpu, cuda).")
+    parser.add_argument("--style", type=str, default="gtav", choices=["gtav", "anime", "realistic", "pixar"], help="Visual style.")
 
     args = parser.parse_args()
 
@@ -69,17 +70,33 @@ def main():
         else:
             device = "cpu"
 
-    # Style suffix for positive prompt
+    # Style configuration mappings
     style_suffix = ", gtav style, bold black ink outlines, flat cell shading, clean outlines, high contrast, comic book artwork, loading screen illustration"
+    neg_suffix = ", photorealistic, realistic, 3d render, soft shading, gradient shading, outline-free"
+    ckpt_name = "hassakuAnima_v1.safetensors"
+
+    if args.style == "anime":
+        style_suffix = ", flat anime illustration, high quality 2d anime, anime aesthetic, flat colors, clean outlines, masterwork, masterpiece"
+        neg_suffix = ", photorealistic, realistic, 3d render, low quality, worst quality"
+        ckpt_name = "anything-v5.safetensors"
+    elif args.style == "realistic":
+        style_suffix = ", cinematic photo, photorealistic, 8k resolution, highly detailed, raw photography, dramatic lighting"
+        neg_suffix = ", drawing, painting, cartoon, 3d render, illustration, sketch, low quality, worst quality"
+        ckpt_name = "dreamshaper-8.safetensors"
+    elif args.style == "pixar":
+        style_suffix = ", disney pixar style, 3d cartoon, animated movie character, cute, vibrant colors, detailed textures"
+        neg_suffix = ", realistic, photorealistic, raw photo, drawing, sketch, low quality, worst quality"
+        ckpt_name = "disney-pixar.safetensors"
+
     full_positive_prompt = args.prompt + style_suffix
-    negative_prompt = args.negative_prompt if args.negative_prompt else "low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature, photorealistic, realistic, 3d render, soft shading, gradient shading, outline-free"
+    negative_prompt = args.negative_prompt if args.negative_prompt else f"low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature{neg_suffix}"
 
     # Dynamically construct the ComfyUI workflow JSON schema
     workflow = {
         "1": {
             "class_type": "CheckpointLoaderSimple",
             "inputs": {
-                "ckpt_name": "hassakuAnima_v1.safetensors"
+                "ckpt_name": ckpt_name
             }
         },
         "4": {

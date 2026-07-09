@@ -52,6 +52,7 @@ export default function VideoGenerator({ onSubmitTask }) {
   const [localCfg, setLocalCfg] = useState("");
   const [localSeed, setLocalSeed] = useState("");
   const [localNegativePrompt, setLocalNegativePrompt] = useState("");
+  const [imageStyle, setImageStyle] = useState("gtav");
 
   // Generate Script using AI from backend
   const handleGenerateScript = async () => {
@@ -145,7 +146,8 @@ export default function VideoGenerator({ onSubmitTask }) {
         local_steps: localSteps ? parseInt(localSteps) : null,
         local_cfg: localCfg ? parseFloat(localCfg) : null,
         local_seed: localSeed ? parseInt(localSeed) : null,
-        local_negative_prompt: localNegativePrompt || null
+        local_negative_prompt: localNegativePrompt || null,
+        image_style: imageStyle
       });
       
       setMessage({ 
@@ -260,6 +262,30 @@ export default function VideoGenerator({ onSubmitTask }) {
             </div>
 
             <div className="form-group">
+              <label>Gaya Visual Gambar (Visual Style)</label>
+              <select
+                value={imageStyle}
+                onChange={e => setImageStyle(e.target.value)}
+                disabled={isSubmitting}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  color: 'white',
+                  borderRadius: '6px',
+                  padding: '8px 12px',
+                  width: '100%',
+                  outline: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="gtav" style={{ background: '#1c1c24', color: 'white' }}>🟢 GTA V Cartoon (Rotoscoped Outlines)</option>
+                <option value="anime" style={{ background: '#1c1c24', color: 'white' }}>🔵 Flat Anime 2D (Sleek Illustrations)</option>
+                <option value="realistic" style={{ background: '#1c1c24', color: 'white' }}>🔴 Cinematic Realistic (High Detail Photos)</option>
+                <option value="pixar" style={{ background: '#1c1c24', color: 'white' }}> 3D Pixar Cartoon (Cute Animated Movie)</option>
+              </select>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '16px' }}>
               <label>Visual Aspect Ratio</label>
               <div className="aspect-ratio-group">
                 <div 
