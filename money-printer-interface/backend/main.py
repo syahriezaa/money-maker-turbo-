@@ -78,6 +78,7 @@ class VideoRequest(BaseModel):
     local_seed: Optional[int] = None
     local_negative_prompt: Optional[str] = None
     image_style: Optional[str] = "gtav"
+    character_prompt: Optional[str] = None
 
 # DB connection helper
 def get_db_conn(dbname="money_printer"):
@@ -148,6 +149,8 @@ def init_db():
         # Kolom sub_progress untuk real-time tracking proses TTS/Music/Image
         cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS sub_progress JSONB DEFAULT NULL")
         cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS image_style VARCHAR(50) DEFAULT 'gtav'")
+        # Tambahkan kolom database character_prompt TEXT pada migrasi startup tabel tasks
+        cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS character_prompt TEXT")
         
         cur.execute("""
             CREATE TABLE IF NOT EXISTS videos (
@@ -658,16 +661,17 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         return False
     
     try:
-        # Fetch task-specific local generation settings
+        # Mengambil konfigurasi pembuatan gambar lokal yang spesifik untuk tugas ini
         t_local_steps = None
         t_local_cfg = None
         t_local_seed = None
         t_local_neg = None
         t_image_style = "gtav"
+        character_prompt = None
         try:
             conn = get_db_conn()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT local_steps, local_cfg, local_seed, local_negative_prompt, image_style FROM tasks WHERE id = %s", (task_id,))
+            cur.execute("SELECT local_steps, local_cfg, local_seed, local_negative_prompt, image_style, character_prompt FROM tasks WHERE id = %s", (task_id,))
             row = cur.fetchone()
             cur.close()
             conn.close()
@@ -677,6 +681,7 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                 t_local_seed = row.get("local_seed")
                 t_local_neg = row.get("local_negative_prompt")
                 t_image_style = row.get("image_style") or "gtav"
+                character_prompt = row.get("character_prompt")
         except Exception as db_err:
             print(f"Error querying task settings from database: {db_err}")
 
@@ -986,8 +991,12 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                     img_path = os.path.join(STATIC_DIR, f"scene_{task_id}_{i}.png")
                     scene_clip_path = os.path.join(STATIC_DIR, f"scene_{task_id}_{i}.mp4")
 
-                    # Build a short visual prompt from the scene paragraph
+                    # Buat prompt visual singkat dari paragraf adegan
                     scene_prompt = scene_text[:200] + f", {actual_subject} setting"
+
+                    # Gabungkan prompt karakter jika ditentukan
+                    if character_prompt and character_prompt.strip():
+                        scene_prompt = f"{character_prompt}, {scene_prompt}"
 
                     res_arg = "512x896" if aspect_ratio == "9:16" else ("896x512" if aspect_ratio == "16:9" else "512x512")
                     # 1. Generate image
@@ -1282,7 +1291,8 @@ def get_task_status_db(task_id: str) -> Dict[str, Any]:
         "logs": logs_data,
         "sub_progress": sub_progress_data,
         "video_url": f"/static/video_{task_id}.mp4" if task["status"] == "Completed" else None,
-        "image_style": task.get("image_style") or "gtav"
+        "image_style": task.get("image_style") or "gtav",
+        "character_prompt": task.get("character_prompt")
     }
 
 @app.post("/api/v1/videos")
@@ -1314,15 +1324,15 @@ def create_video_task(req: VideoRequest):
             INSERT INTO tasks (
                 id, subject, script, aspect_ratio, voice_name, language, 
                 paragraph_number, duration_seconds, created_at, status, progress, step, logs,
-                local_steps, local_cfg, local_seed, local_negative_prompt, image_style
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                local_steps, local_cfg, local_seed, local_negative_prompt, image_style, character_prompt
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 task_id, req.video_subject, "", req.video_aspect_ratio, req.voice_name, 
                 req.language, req.paragraph_number, duration_seconds, created_at, 
                 status, progress, step, json.dumps(logs),
                 req.local_steps, req.local_cfg, req.local_seed, req.local_negative_prompt,
-                req.image_style
+                req.image_style, req.character_prompt
             )
         )
         cur.close()

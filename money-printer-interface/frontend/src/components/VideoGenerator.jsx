@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, Play, Video, AlignLeft, Volume2, Globe, Layers, AlertCircle, CheckCircle2, Sliders } from 'lucide-react';
+import { Sparkles, Play, Video, AlignLeft, Volume2, Globe, Layers, AlertCircle, CheckCircle2, Sliders, User } from 'lucide-react';
 import { generateScript } from '../api';
 
 const VOICES = [
@@ -53,6 +53,10 @@ export default function VideoGenerator({ onSubmitTask }) {
   const [localSeed, setLocalSeed] = useState("");
   const [localNegativePrompt, setLocalNegativePrompt] = useState("");
   const [imageStyle, setImageStyle] = useState("gtav");
+
+  // State untuk Konsistensi Karakter (Character Consistency)
+  const [showCharSettings, setShowCharSettings] = useState(false);
+  const [characterPrompt, setCharacterPrompt] = useState("");
 
   // Generate Script using AI from backend
   const handleGenerateScript = async () => {
@@ -147,7 +151,8 @@ export default function VideoGenerator({ onSubmitTask }) {
         local_cfg: localCfg ? parseFloat(localCfg) : null,
         local_seed: localSeed ? parseInt(localSeed) : null,
         local_negative_prompt: localNegativePrompt || null,
-        image_style: imageStyle
+        image_style: imageStyle,
+        character_prompt: characterPrompt
       });
       
       setMessage({ 
@@ -379,6 +384,61 @@ export default function VideoGenerator({ onSubmitTask }) {
                       onChange={e => setLocalNegativePrompt(e.target.value)}
                       style={{ minHeight: '50px', padding: '8px', fontSize: '0.8rem', color: 'black', borderRadius: '6px' }}
                     />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Bagian Collapsible untuk Konsistensi Karakter */}
+            <div style={{ marginTop: '16px', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '10px', overflow: 'hidden' }}>
+              <button
+                type="button"
+                onClick={() => setShowCharSettings(!showCharSettings)}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  background: 'rgba(0,0,0,0.2)',
+                  border: 'none',
+                  padding: '12px 16px',
+                  color: 'white',
+                  cursor: 'pointer',
+                  fontSize: '0.9rem',
+                  fontWeight: 600
+                }}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <User size={16} /> Konsistensi Karakter (Character Consistency)
+                </span>
+                <span>{showCharSettings ? '▲' : '▼'}</span>
+              </button>
+
+              {showCharSettings && (
+                <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', background: 'rgba(0,0,0,0.1)' }}>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label>Deskripsi Fisik Karakter Utama</label>
+                    <textarea
+                      placeholder="Contoh: Elian, laki-laki berusia 25 tahun dengan rambut perak dan mata amber"
+                      value={characterPrompt}
+                      onChange={e => setCharacterPrompt(e.target.value)}
+                      disabled={isSubmitting}
+                      style={{ 
+                        minHeight: '80px', 
+                        padding: '10px', 
+                        fontSize: '0.85rem', 
+                        color: 'white', 
+                        borderRadius: '6px',
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                        width: '100%',
+                        outline: 'none',
+                        resize: 'vertical'
+                      }}
+                    />
+                    <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '6px', fontSize: '0.75rem', lineHeight: '1.4' }}>
+                      Tuliskan deskripsi fisik secara rinci untuk menjaga konsistensi wajah, pakaian, dan ciri khas karakter utama di setiap scene video yang dihasilkan.
+                    </small>
                   </div>
                 </div>
               )}
