@@ -991,12 +991,8 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                     img_path = os.path.join(STATIC_DIR, f"scene_{task_id}_{i}.png")
                     scene_clip_path = os.path.join(STATIC_DIR, f"scene_{task_id}_{i}.mp4")
 
-                    # Buat prompt visual singkat dari paragraf adegan
-                    scene_prompt = scene_text[:200] + f", {actual_subject} setting"
-
-                    # Gabungkan prompt karakter jika ditentukan
-                    if character_prompt and character_prompt.strip():
-                        scene_prompt = f"{character_prompt}, {scene_prompt}"
+                    # Buat prompt visual dari adegan menggunakan fungsi terpusat
+                    scene_prompt = generate_scene_image_prompt(scene_text, actual_subject, image_style, character_prompt)
 
                     res_arg = "512x896" if aspect_ratio == "9:16" else ("896x512" if aspect_ratio == "16:9" else "512x512")
                     # 1. Generate image
@@ -1794,19 +1790,114 @@ def generate_simulated_script(subject: str, language: str, paragraphs: int) -> s
 
     return "\n\n".join(result_paras)
 
-def humanize_script(script: str, provider: str, api_key: str, language: str, paragraphs: int) -> str:
-    print(f"Running Stage 2: Humanizer Agent pass using provider: {provider}")
-    
-    system_prompt = (
+def get_script_system_prompt(paragraphs: int, language: str) -> str:
+    # Mengembalikan system prompt untuk pembuatan skrip.
+    # Secara otomatis mendeteksi genre dan nada cerita berdasarkan subjek yang diberikan pengguna.
+    # Menghindari bias horor dan tidak menyertakan contoh dialog horor seperti "Aku merinding...".
+    # Menggunakan POV orang pertama (1st person POV).
+    # Bahasa Indonesia menggunakan gaya kasual/gaul ramah Gen Z agar terasa seperti vlog nyata.
+    return (
+        f"You are an elite, professional creative storyteller and script writer. "
+        f"Your goal is to write a highly engaging, immersive, and vivid spoken script/story about the user's topic. "
+        f"You must automatically detect the genre and tone of the story from the user's provided subject "
+        f"(e.g., sci-fi/adventure for space, horror for spooky/creepy, educational/documentary for facts/nature, drama/slice-of-life for personal stories). "
+        f"Adapt your storytelling style and tone to match the detected genre without forcing any pre-determined genre. "
+        f"The story/script MUST be written from a first-person point of view (1st person POV) as a personal experience. "
+        f"For English, write it in a casual, conversational storytelling tone (using natural pauses like '...' and bracketed paralinguistic tags like [sigh], [gasp], [laughter], [chuckle]). "
+        f"For Indonesian, write it in a casual, slightly slangy Gen Z-friendly language (bahasa santai/gaul, e.g., using 'gue/lo/kita' instead of 'saya/anda/kami', and using common informal terms like 'bener-bener', 'parah', 'gokil' to make it feel like a real vlog storytelling of the detected genre). "
+        f"You must write it as a natural narrative with no speaker names or character prefixes (do NOT write 'Saya:', 'Andi:', 'Narator:', etc.). "
+        f"Instead, embed character dialogue directly within the paragraphs using quotation marks (e.g., when a character speaks, use quotation marks like \"Aku rasa...\" or \"Kok bisa ya...\"). "
+        f"Do not write generic marketing or summary content. It should have exactly {paragraphs} paragraphs, written in {language} language. "
+        f"Write ONLY the script story text, with no introduction, no outro, and no stage directions/audio cues."
+    )
+
+def get_humanizer_system_prompt(paragraphs: int) -> str:
+    # Mengembalikan system prompt untuk humanizer agent.
+    # Memperhalus skrip agar terdengar alami, percakapan, dan mentah tanpa contoh dialog horor yang di-hardcode.
+    return (
         f"You are an expert Humanizer Agent. Your job is to take a draft storytelling script and refine it to make it sound incredibly natural, conversational, and raw as if spoken by a real person in a vlog or podcast.\n"
         f"For English, rewrite the script in a casual, conversational storytelling tone (using natural pauses like '...' and inserting paralinguistic tag tokens in brackets like [sigh], [gasp], [laughter], [chuckle] where a speaker would naturally express emotion).\n"
         f"For Indonesian, rewrite the script in a casual, slightly slangy Gen Z-friendly language (bahasa santai/gaul, e.g., using 'gue/lo/kita' instead of 'saya/anda/kami', and using common informal terms like 'bener-bener', 'parah', 'gokil', 'deh', 'sih', 'kok', and inserting paralinguistic tag tokens in brackets like [sigh], [gasp], [laughter], [chuckle]).\n"
         f"CRITICAL REQUIREMENTS:\n"
         f"1. The story/script MUST remain in first-person POV (1st person POV) as a personal experience.\n"
         f"2. You must NOT add any speaker names or character prefixes (do NOT write 'Saya:', 'Andi:', 'Narator:', etc.).\n"
-        f"3. All character spoken dialogue MUST be enclosed in double quotes (e.g. \"Aku merinding...\") and narration MUST NOT have quotes.\n"
+        f"3. All character spoken dialogue MUST be enclosed in double quotes (e.g. \"Aku rasa...\" or \"Kok bisa ya...\") and narration MUST NOT have quotes.\n"
         f"4. Output ONLY the final humanized script text, maintaining exactly {paragraphs} paragraphs, with no extra introductions or outro notes."
     )
+
+def generate_scene_image_prompt(scene_text: str, subject: str, image_style: str = None, character_prompt: str = None) -> str:
+    # Membersihkan tag paralinguistik dalam tanda kurung siku (seperti [sigh], [gasp]).
+    # Memisahkan narasi dari dialog, memprioritaskan narasi untuk mengekstrak konteks visual.
+    # Mengekstrak kata kunci visual sambil memfilter kata pengisi/slang percakapan (seperti gue, lo, bener-bener, dll).
+    # Menggabungkan image_style dan character_prompt ke dalam prompt deskriptif akhir.
+    import re
+    
+    # 1. Bersihkan tag paralinguistik di dalam kurung siku
+    cleaned_text = re.sub(r'\[[^\]]*\]', '', scene_text)
+    
+    # 2. Pisahkan narasi dan dialog. Dialog berada di dalam tanda kutip ganda.
+    parts = re.split(r'("[^"]*")', cleaned_text)
+    narration_parts = []
+    dialogue_parts = []
+    
+    for part in parts:
+        part_strip = part.strip()
+        if not part_strip:
+            continue
+        if part_strip.startswith('"') and part_strip.endswith('"'):
+            dialogue_parts.append(part_strip[1:-1].strip())
+        else:
+            narration_parts.append(part_strip)
+            
+    # Prioritaskan narasi untuk ekstraksi konteks visual
+    visual_base = " ".join(narration_parts).strip()
+    if not visual_base:
+        # Jika tidak ada narasi, gunakan teks dialog
+        visual_base = " ".join(dialogue_parts).strip()
+    if not visual_base:
+        visual_base = cleaned_text.strip()
+        
+    # 3. Filter kata-kata slang dan pengisi percakapan (case-insensitive)
+    filler_words = {"gue", "lo", "bener-bener", "parah", "gokil", "sih", "deh", "kok"}
+    filler_pattern = r'\b(' + '|'.join(filler_words) + r')\b'
+    
+    cleaned_visual = re.sub(filler_pattern, '', visual_base, flags=re.IGNORECASE)
+    
+    # Bersihkan spasi ganda dan tanda baca gantung
+    cleaned_visual = re.sub(r'\s+', ' ', cleaned_visual).strip()
+    cleaned_visual = re.sub(r'\s*,\s*', ', ', cleaned_visual)
+    cleaned_visual = re.sub(r'^\s*,\s*|\s*,\s*$', '', cleaned_visual)
+    cleaned_visual = re.sub(r'\s*\.\s*', '. ', cleaned_visual)
+    cleaned_visual = re.sub(r'^\s*\.\s*|\s*\.\s*$', '', cleaned_visual)
+    cleaned_visual = cleaned_visual.strip()
+    
+    if not cleaned_visual:
+        cleaned_visual = subject
+        
+    # 4. Gabungkan character_prompt, visual adegan yang dibersihkan, subjek, dan style
+    prompt_parts = []
+    if character_prompt and character_prompt.strip():
+        prompt_parts.append(character_prompt.strip())
+        
+    prompt_parts.append(cleaned_visual)
+    
+    if subject and subject.strip():
+        prompt_parts.append(f"{subject.strip()} setting")
+        
+    if image_style and image_style.strip():
+        prompt_parts.append(f"{image_style.strip()} style")
+        
+    final_prompt = ", ".join(prompt_parts)
+    # Bersihkan koma berturut-turut atau spasi berlebih
+    final_prompt = re.sub(r',\s*,', ',', final_prompt)
+    final_prompt = re.sub(r'\s+', ' ', final_prompt).strip()
+    
+    return final_prompt
+
+def humanize_script(script: str, provider: str, api_key: str, language: str, paragraphs: int) -> str:
+    print(f"Running Stage 2: Humanizer Agent pass using provider: {provider}")
+    
+    system_prompt = get_humanizer_system_prompt(paragraphs)
     
     try:
         if provider == "openai":
@@ -1900,7 +1991,7 @@ def generate_script_endpoint(req: ScriptGenerateRequest):
             payload = {
                 "model": "gpt-4o-mini",
                 "messages": [
-                    {"role": "system", "content": f"You are an elite, professional creative storyteller and script writer. Your goal is to write a highly engaging, immersive, and vivid spoken script/story about the user's topic. The story/script MUST be written from a first-person point of view (1st person POV) as a personal experience. For English, write it in a casual, conversational storytelling tone (using natural pauses and bracketed paralinguistic tags like [sigh], [gasp], [laughter], [chuckle]). For Indonesian, write it in a casual, slightly slangy Gen Z-friendly language (bahasa santai/gaul, e.g., using 'gue/lo/kita' instead of 'saya/anda/kami', and using common informal terms like 'bener-bener', 'parah', 'gokil' to make it feel like a real horror vlog storytelling). You must write it as a natural narrative with no speaker names or character prefixes (do NOT write 'Saya:', 'Andi:', 'Narator:', etc.). Instead, embed character dialogue directly within the paragraphs using quotation marks (e.g. Teman saya Andi tiba-tiba berbisik, \"Aku merinding...\"). Do not write generic marketing or summary content. It should have exactly {paragraphs} paragraphs, written in {language} language. Write ONLY the script story text, with no introduction, no outro, and no stage directions/audio cues."},
+                    {"role": "system", "content": get_script_system_prompt(paragraphs, language)},
                     {"role": "user", "content": f"Subject: {subject}"}
                 ]
             }
@@ -1913,15 +2004,7 @@ def generate_script_endpoint(req: ScriptGenerateRequest):
             headers = {
                 "Content-Type": "application/json"
             }
-            prompt_text = (
-                f"You are an elite, professional creative storyteller and script writer. Your goal is to write a highly engaging, immersive, and vivid spoken script/story about the user's topic: {subject}. "
-                f"The story/script MUST be written from a first-person point of view (1st person POV) as a personal experience. "
-                f"For Indonesian, write it in a casual, slightly slangy Gen Z-friendly language (bahasa santai/gaul, e.g., using 'gue/lo/kita' instead of 'saya/anda/kami', and using common informal terms like 'bener-bener', 'parah', 'gokil' to make it feel like a real horror vlog storytelling). "
-                f"You must write it as a natural narrative with no speaker names or character prefixes (do NOT write 'Saya:', 'Andi:', 'Narator:', etc.). "
-                f"Instead, embed character dialogue directly within the paragraphs using quotation marks (e.g. Teman saya Andi tiba-tiba berbisik, \"Aku merinding...\"). "
-                f"Do not write generic marketing or summary content. It should have exactly {paragraphs} paragraphs, written in {language} language. "
-                f"Write ONLY the script story text, with no introduction, no outro, and no stage directions/audio cues."
-            )
+            prompt_text = f"{get_script_system_prompt(paragraphs, language)}\n\nSubject: {subject}"
             payload = {
                 "contents": [{
                     "parts": [{"text": prompt_text}]
@@ -1939,7 +2022,7 @@ def generate_script_endpoint(req: ScriptGenerateRequest):
             payload = {
                 "model": "llama3-8b-8192",
                 "messages": [
-                    {"role": "system", "content": f"You are an elite, professional creative storyteller and script writer. Your goal is to write a highly engaging, immersive, and vivid spoken script/story about the user's topic. The story/script MUST be written from a first-person point of view (1st person POV) as a personal experience. For Indonesian, write it in a casual, slightly slangy Gen Z-friendly language (bahasa santai/gaul, e.g., using 'gue/lo/kita' instead of 'saya/anda/kami', and using common informal terms like 'bener-bener', 'parah', 'gokil' to make it feel like a real horror vlog storytelling). You must write it as a natural narrative with no speaker names or character prefixes (do NOT write 'Saya:', 'Andi:', 'Narator:', etc.). Instead, embed character dialogue directly within the paragraphs using quotation marks (e.g. Teman saya Andi tiba-tiba berbisik, \"Aku merinding...\"). Do not write generic marketing or summary content. It should have exactly {paragraphs} paragraphs, written in {language} language. Write ONLY the script story text, with no introduction, no outro, and no stage directions/audio cues."},
+                    {"role": "system", "content": get_script_system_prompt(paragraphs, language)},
                     {"role": "user", "content": f"Subject: {subject}"}
                 ]
             }
@@ -1955,7 +2038,7 @@ def generate_script_endpoint(req: ScriptGenerateRequest):
             payload = {
                 "model": "deepseek-chat",
                 "messages": [
-                    {"role": "system", "content": f"You are an elite, professional creative storyteller and script writer. Your goal is to write a highly engaging, immersive, and vivid spoken script/story about the user's topic. The story/script MUST be written from a first-person point of view (1st person POV) as a personal experience. For Indonesian, write it in a casual, slightly slangy Gen Z-friendly language (bahasa santai/gaul, e.g., using 'gue/lo/kita' instead of 'saya/anda/kami', and using common informal terms like 'bener-bener', 'parah', 'gokil' to make it feel like a real horror vlog storytelling). You must write it as a natural narrative with no speaker names or character prefixes (do NOT write 'Saya:', 'Andi:', 'Narator:', etc.). Instead, embed character dialogue directly within the paragraphs using quotation marks (e.g. Teman saya Andi tiba-tiba berbisik, \"Aku merinding...\"). Do not write generic marketing or summary content. It should have exactly {paragraphs} paragraphs, written in {language} language. Write ONLY the script story text, with no introduction, no outro, and no stage directions/audio cues."},
+                    {"role": "system", "content": get_script_system_prompt(paragraphs, language)},
                     {"role": "user", "content": f"Subject: {subject}"}
                 ]
             }
