@@ -91,22 +91,19 @@ def main():
     full_positive_prompt = args.prompt + style_suffix
     negative_prompt = args.negative_prompt if args.negative_prompt else f"low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature{neg_suffix}"
 
-    # Dynamically construct the ComfyUI workflow JSON schema
+    # Dynamically construct the ComfyUI workflow JSON schema.
+    # LoRA (AnimaMythP0rtr4itStyleV1 — portrait bias) is ONLY injected for the
+    # anime style. For all other styles the KSampler connects directly to the
+    # CheckpointLoaderSimple so that no character bias overrides the scene content.
+    use_lora = (args.style == "anime")
+    # model/clip source node: "4" (LoraLoader) for anime, "1" (checkpoint) otherwise
+    model_source = "4" if use_lora else "1"
+
     workflow = {
         "1": {
             "class_type": "CheckpointLoaderSimple",
             "inputs": {
                 "ckpt_name": ckpt_name
-            }
-        },
-        "4": {
-            "class_type": "LoraLoader",
-            "inputs": {
-                "lora_name": "AnimaMythP0rtr4itStyleV1.safetensors",
-                "strength_model": 1.0,
-                "strength_clip": 1.0,
-                "model": ["1", 0],
-                "clip": ["1", 1]
             }
         },
         "5": {
@@ -121,14 +118,14 @@ def main():
             "class_type": "CLIPTextEncode",
             "inputs": {
                 "text": full_positive_prompt,
-                "clip": ["4", 1]
+                "clip": [model_source, 1]
             }
         },
         "7": {
             "class_type": "CLIPTextEncode",
             "inputs": {
                 "text": negative_prompt,
-                "clip": ["4", 1]
+                "clip": [model_source, 1]
             }
         },
         "3": {
@@ -140,7 +137,7 @@ def main():
                 "sampler_name": "dpmpp_2m",
                 "scheduler": "karras",
                 "denoise": 1.0,
-                "model": ["4", 0],
+                "model": [model_source, 0],
                 "positive": ["6", 0],
                 "negative": ["7", 0],
                 "latent_image": ["5", 0]
@@ -161,6 +158,19 @@ def main():
             }
         }
     }
+
+    # Inject LoraLoader node only for anime style
+    if use_lora:
+        workflow["4"] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": "AnimaMythP0rtr4itStyleV1.safetensors",
+                "strength_model": 1.0,
+                "strength_clip": 1.0,
+                "model": ["1", 0],
+                "clip": ["1", 1]
+            }
+        }
 
     print("--- Generated Dynamic ComfyUI Workflow JSON ---")
     print(json.dumps(workflow, indent=2))

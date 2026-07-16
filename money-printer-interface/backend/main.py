@@ -692,7 +692,7 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         local_negative_prompt = t_local_neg if t_local_neg is not None else global_config.get("local_negative_prompt", "low quality, worst quality, deformed, bad anatomy, bad hands, blurry, watermark, text, signature")
         image_style = t_image_style
 
-        is_local = (tts_provider == "local-chatterbox")
+        is_local = (tts_provider in ["local-chatterbox", "local-fishaudio"])
         sleep_step = (duration_seconds / 6.0) if not is_local else 0.5
         
         update_db(5, "LLM Scripting", "LLM Scripting", f"Generating script using LLM with prompt: '{subject}'")
@@ -741,33 +741,47 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         
         audio_duration = None
         if is_local:
-            update_db(35, "Voice Synthesis", "Voice Synthesis", "Running Chatterbox Turbo TTS engine locally...")
-            
-            # Use current backend python interpreter
-            interpreter = sys.executable
-            script_path = os.path.join(BASE_DIR, "generate_tts_local.py")
-            
-            cmd = [interpreter, script_path, script_text, wav_path, language, voice_name]
-            print(f"Running local TTS subprocess: {' '.join(cmd)}")
-            # Gunakan Popen agar progress tqdm bisa dibaca real-time
-            stdout_out, returncode = run_subprocess_with_progress(
-                cmd,
-                phase="Sintesis Suara",
-                segment=None,
-                total_segments=None
-            )
-            # Bersihkan sub_progress TTS sebelum lanjut ke tahap berikutnya
-            clear_sub_progress()
+            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
+                print(f"[TTS] Reusing existing audio file at {wav_path}")
+                update_db(45, "Voice Synthesis", "Voice Synthesis", f"Audio file already exists. Reusing static/audio_{task_id}.wav")
+                audio_clip = AudioFileClip(wav_path)
+                audio_duration = audio_clip.duration
+                audio_clip.close()
+            else:
+                update_db(35, "Voice Synthesis", "Voice Synthesis", f"Running local TTS engine (Provider: {tts_provider})...")
+                
+                # Set provider in environment for subprocess
+                os.environ["TTS_PROVIDER"] = tts_provider
+                
+                # Use current backend python interpreter
+                interpreter = sys.executable
+                script_path = os.path.join(BASE_DIR, "generate_tts_local.py")
+                # Write script text to a temporary file to bypass Windows command line limits/escaping bugs
+                script_text_file = os.path.join(STATIC_DIR, f"script_{task_id}.txt")
+                with open(script_text_file, "w", encoding="utf-8") as f:
+                    f.write(script_text)
+                    
+                cmd = [interpreter, "-u", script_path, script_text_file, wav_path, language, voice_name]
+                print(f"Running local TTS subprocess: {' '.join(cmd)}")
+                # Gunakan Popen agar progress tqdm bisa dibaca real-time
+                stdout_out, returncode = run_subprocess_with_progress(
+                    cmd,
+                    phase="Sintesis Suara",
+                    segment=None,
+                    total_segments=None
+                )
+                # Bersihkan sub_progress TTS sebelum lanjut ke tahap berikutnya
+                clear_sub_progress()
 
-            if returncode != 0:
-                raise Exception(f"Chatterbox TTS subprocess failed: {stdout_out}")
+                if returncode != 0:
+                    raise Exception(f"Chatterbox TTS subprocess failed: {stdout_out}")
 
-            update_db(45, "Voice Synthesis", "Voice Synthesis", f"Audio file synthesized locally. Saved to static/audio_{task_id}.wav")
-            
-            # Load audio to get its duration
-            audio_clip = AudioFileClip(wav_path)
-            audio_duration = audio_clip.duration
-            audio_clip.close()
+                update_db(45, "Voice Synthesis", "Voice Synthesis", f"Audio file synthesized locally. Saved to static/audio_{task_id}.wav")
+                
+                # Load audio to get its duration
+                audio_clip = AudioFileClip(wav_path)
+                audio_duration = audio_clip.duration
+                audio_clip.close()
         else:
             update_db(35, "Voice Synthesis", "Voice Synthesis", f"Running Edge-TTS engine locally with voice '{voice_name}'...")
             try:
@@ -797,8 +811,12 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         if check_cancelled():
             return
         # Runs for all providers but only if local benchmark python is available.
-        mixed_audio_path = None
-        if os.path.exists(wav_path) and audio_duration:
+        mixed_audio_path = os.path.join(STATIC_DIR, f"mixed_{task_id}.wav")
+        if os.path.exists(mixed_audio_path) and os.path.getsize(mixed_audio_path) > 1000:
+            print(f"[Music] Reusing existing mixed audio file at {mixed_audio_path}")
+            update_db(50, "AI Music", "AI Music", "Background music mixed with voiceover (reused existing).")
+        elif os.path.exists(wav_path) and audio_duration:
+            mixed_audio_path = None
             try:
                 update_db(48, "AI Music", "AI Music", "Generating AI background music with MusicGen locally...")
                 # Use current backend python interpreter
@@ -948,23 +966,67 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
         subtitle_fontsize = config.get("subtitle_fontsize", 24)
         
         subtitle_color = hex_to_rgb(subtitle_color_hex)
-        # ─── Local AI Image Generation (SDXL Turbo) per scene ────────────────────
+        # ─── Local AI Image Generation — In-Process with Persistent Cache ──────────
         if check_cancelled():
             return
         ai_scene_clips = []
         if is_local:
+            worker_proc = None
             try:
-                update_db(52, "AI Visuals", "AI Visuals", "Generating AI scene images with SDXL Turbo locally...")
-                # Use current backend python interpreter
-                local_benchmark_python_img = sys.executable
+                update_db(52, "AI Visuals", "AI Visuals", "Generating AI scene images (persistent background worker)...")
 
-                img_gen_script = os.path.join(BASE_DIR, "generate_images_local.py")
                 cam_motion_script = os.path.join(BASE_DIR, "apply_camera_motion.py")
 
-                # Split script into visual scenes (sentences) and group them into slides of at least 15 words (~6-7 seconds per scene)
+                # Map style -> checkpoint name (mirrors generate_images_local.py)
+                _style_ckpt_map = {
+                    "anime":    "anything-v5.safetensors",
+                    "realistic":"dreamshaper-8.safetensors",
+                    "pixar":    "disney-pixar.safetensors",
+                    "gtav":     "hassakuAnima_v1.safetensors",
+                }
+                _ckpt_name = _style_ckpt_map.get(image_style, "hassakuAnima_v1.safetensors")
+
+                # Map style -> prompt suffix (mirrors generate_images_local.py)
+                _style_suffix_map = {
+                    "anime":    ", flat anime illustration, high quality 2d anime, anime aesthetic, flat colors, clean outlines, masterwork, masterpiece",
+                    "realistic":", cinematic photo, photorealistic, 8k resolution, highly detailed, raw photography, dramatic lighting",
+                    "pixar":    ", disney pixar style, 3d cartoon, animated movie character, cute, vibrant colors, detailed textures",
+                    "gtav":     ", gtav style, bold black ink outlines, flat cell shading, clean outlines, high contrast, comic book artwork, loading screen illustration",
+                }
+                _style_suffix = _style_suffix_map.get(image_style, _style_suffix_map["gtav"])
+                _neg_suffix_map = {
+                    "anime":    ", photorealistic, realistic, 3d render, low quality, worst quality",
+                    "realistic":", drawing, painting, cartoon, 3d render, illustration, sketch, low quality, worst quality",
+                    "pixar":    ", realistic, photorealistic, raw photo, drawing, sketch, low quality, worst quality",
+                    "gtav":     ", photorealistic, realistic, 3d render, soft shading, gradient shading, outline-free",
+                }
+                _neg_suffix = _neg_suffix_map.get(image_style, _neg_suffix_map["gtav"])
+                _base_neg = local_negative_prompt + _neg_suffix
+
+                # Determine output resolution
+                if aspect_ratio == "9:16":
+                    _img_w, _img_h = 512, 896
+                elif aspect_ratio == "16:9":
+                    _img_w, _img_h = 896, 512
+                else:
+                    _img_w, _img_h = 512, 512
+
+                # ── Spawn Persistent Worker Subprocess ─────────────────────────
+                worker_script = os.path.join(BASE_DIR, "image_worker_daemon.py")
+                worker_cmd = [sys.executable, "-u", worker_script]
+                print(f"[ImageGen] Spawning image worker daemon: {' '.join(worker_cmd)}")
+                worker_proc = subprocess.Popen(
+                    worker_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,  # Line-buffered
+                )
+
+                # ── Split script into visual scenes ────────────────────────────
                 raw_sents = re.split(r'(?<=[.!?])\s+', script_text.replace("\n\n", " ").replace("\n", " "))
                 sents = [s.strip() for s in raw_sents if s.strip()]
-                
+
                 scene_paragraphs = []
                 current_scene = []
                 current_word_count = 0
@@ -981,47 +1043,97 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                         scene_paragraphs[-1] += " " + " ".join(current_scene)
                     else:
                         scene_paragraphs.append(" ".join(current_scene))
-                        
+
                 if not scene_paragraphs:
                     scene_paragraphs = [actual_subject]
 
                 scene_duration = (audio_duration or duration_seconds) / max(len(scene_paragraphs), 1)
 
+                # Generate all scene prompts at once to maintain environmental and background consistency
+                scene_prompts = generate_all_scene_prompts(scene_paragraphs, actual_subject, image_style, character_prompt)
+
+                # ── Per-scene generation ───────────────────────────────────────
                 for i, scene_text in enumerate(scene_paragraphs):
+                    if check_cancelled():
+                        break
+
                     img_path = os.path.join(STATIC_DIR, f"scene_{task_id}_{i}.png")
                     scene_clip_path = os.path.join(STATIC_DIR, f"scene_{task_id}_{i}.mp4")
 
-                    # Buat prompt visual dari adegan menggunakan fungsi terpusat
-                    scene_prompt = generate_scene_image_prompt(scene_text, actual_subject, image_style, character_prompt)
+                    scene_prompt = scene_prompts[i]
+                    full_prompt = scene_prompt + _style_suffix
 
-                    res_arg = "512x896" if aspect_ratio == "9:16" else ("896x512" if aspect_ratio == "16:9" else "512x512")
-                    # 1. Generate image
-                    img_cmd = [
-                        local_benchmark_python_img, 
-                        img_gen_script, 
-                        scene_prompt, 
-                        img_path,
-                        "--resolution", res_arg,
-                        "--steps", str(local_steps),
-                        "--cfg", str(local_cfg),
-                        "--seed", str(local_seed),
-                        "--negative-prompt", local_negative_prompt,
-                        "--style", image_style
-                    ]
-                    # Gunakan Popen agar progress tqdm SDXL bisa dibaca real-time per scene
-                    img_stdout, img_returncode = run_subprocess_with_progress(
-                        img_cmd,
-                        phase="Generasi Gambar AI",
-                        segment=i + 1,
-                        total_segments=len(scene_paragraphs)
+                    update_db(
+                        53 + i,
+                        "AI Visuals",
+                        "AI Visuals",
+                        f"Generating scene {i+1}/{len(scene_paragraphs)}: {scene_prompt[:60]}..."
                     )
-                    # Bersihkan sub_progress image scene ini sebelum lanjut
-                    clear_sub_progress()
 
-                    if img_returncode == 0 and os.path.exists(img_path):
+                    try:
+                        # Request visual prompt from worker daemon
+                        payload = {
+                            "action": "generate",
+                            "ckpt_name": _ckpt_name,
+                            "style": image_style,
+                            "prompt": full_prompt,
+                            "neg_prompt": _base_neg,
+                            "steps": local_steps,
+                            "cfg": local_cfg,
+                            "seed": local_seed + i,
+                            "img_h": _img_h,
+                            "img_w": _img_w,
+                            "img_path": img_path
+                        }
+                        worker_proc.stdin.write(json.dumps(payload) + "\n")
+                        worker_proc.stdin.flush()
+
+                        # Read stream response from worker
+                        _sd_t0 = time.time()
+                        while True:
+                            worker_line = worker_proc.stdout.readline()
+                            if not worker_line:
+                                break
+                            
+                            try:
+                                resp = json.loads(worker_line)
+                                status = resp.get("status")
+                                if status == "progress":
+                                    step = resp.get("step")
+                                    total_steps = resp.get("total_steps")
+                                    pct = int(step / total_steps * 100)
+                                    elapsed = time.time() - _sd_t0
+                                    speed = step / elapsed if elapsed > 0 else 0
+                                    eta = int(max(0, total_steps - step) / speed) if speed > 0 else 0
+                                    update_sub_progress({
+                                        "phase": "AI Image",
+                                        "segment": i + 1,
+                                        "total_segments": len(scene_paragraphs),
+                                        "step": step,
+                                        "total_steps": total_steps,
+                                        "pct": pct,
+                                        "speed": round(speed, 2),
+                                        "eta": eta,
+                                    })
+                                elif status == "success":
+                                    break
+                                elif status == "error":
+                                    raise RuntimeError(resp.get("error"))
+                            except Exception as parse_e:
+                                # Fallback in case of stdout logging noise
+                                print(f"[Worker stdout] {worker_line.strip()} (err: {parse_e})")
+
+                        clear_sub_progress()
+                        print(f"[ImageGen] Scene {i+1} saved: {img_path}")
+
+                    except Exception as gen_err:
+                        clear_sub_progress()
+                        print(f"[ImageGen] Scene {i+1} failed: {gen_err}")
+                        continue
+
+                    if os.path.exists(img_path):
                         update_db(54 + i, "AI Visuals", "AI Visuals", f"Scene {i+1}/{len(scene_paragraphs)} image generated. Applying camera motion...")
-                        # 2. Apply Ken Burns camera motion
-                        cam_cmd = [local_benchmark_python_img, cam_motion_script, img_path, scene_clip_path, str(round(scene_duration, 2))]
+                        cam_cmd = [sys.executable, cam_motion_script, img_path, scene_clip_path, str(round(scene_duration, 2))]
                         cam_stdout, cam_returncode = run_subprocess_with_progress(
                             cam_cmd,
                             phase="Animasi Kamera",
@@ -1033,8 +1145,6 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
                             ai_scene_clips.append(scene_clip_path)
                         else:
                             print(f"Camera motion failed for scene {i}: {cam_stdout}")
-                    else:
-                        print(f"Image generation failed for scene {i}: {img_stdout}")
 
                 if ai_scene_clips:
                     update_db(60, "AI Visuals", "AI Visuals", f"{len(ai_scene_clips)}/{len(scene_paragraphs)} AI animated scenes ready.")
@@ -1043,6 +1153,19 @@ def process_task_background(task_id: str, subject: str, aspect_ratio: str, voice
             except Exception as img_err:
                 print(f"Local AI image generation failed: {img_err}")
                 update_db(60, "Sourcing Media", "Sourcing Media", f"AI Visuals skipped: {img_err}. Using standard media.")
+            finally:
+                # Ensure the background daemon process is killed, freeing 100% VRAM/RAM
+                if worker_proc:
+                    try:
+                        worker_proc.stdin.close()
+                        worker_proc.terminate()
+                        worker_proc.wait(timeout=5)
+                    except Exception:
+                        try:
+                            worker_proc.kill()
+                        except Exception:
+                            pass
+
 
         temp_video_clip_path = None
         search_query = clean_subject_for_search(actual_subject)
@@ -1825,74 +1948,350 @@ def get_humanizer_system_prompt(paragraphs: int) -> str:
         f"4. Output ONLY the final humanized script text, maintaining exactly {paragraphs} paragraphs, with no extra introductions or outro notes."
     )
 
-def generate_scene_image_prompt(scene_text: str, subject: str, image_style: str = None, character_prompt: str = None) -> str:
-    # Membersihkan tag paralinguistik dalam tanda kurung siku (seperti [sigh], [gasp]).
-    # Memisahkan narasi dari dialog, memprioritaskan narasi untuk mengekstrak konteks visual.
-    # Mengekstrak kata kunci visual sambil memfilter kata pengisi/slang percakapan (seperti gue, lo, bener-bener, dll).
-    # Menggabungkan image_style dan character_prompt ke dalam prompt deskriptif akhir.
+def generate_all_scene_prompts(scene_paragraphs: List[str], subject: str, image_style: str = None, character_prompt: str = None) -> List[str]:
+    """
+    Generate visual prompts for all scenes at once to maintain background and character consistency.
+    Falls back to generate_scene_image_prompt for each scene if it fails or if offline.
+    """
+    import json
     import re
-    
-    # 1. Bersihkan tag paralinguistik di dalam kurung siku
-    cleaned_text = re.sub(r'\[[^\]]*\]', '', scene_text)
-    
-    # 2. Pisahkan narasi dan dialog. Dialog berada di dalam tanda kutip ganda.
-    parts = re.split(r'("[^"]*")', cleaned_text)
-    narration_parts = []
-    dialogue_parts = []
-    
-    for part in parts:
-        part_strip = part.strip()
-        if not part_strip:
-            continue
-        if part_strip.startswith('"') and part_strip.endswith('"'):
-            dialogue_parts.append(part_strip[1:-1].strip())
-        else:
-            narration_parts.append(part_strip)
+    import requests
+
+    try:
+        config = load_config()
+        provider = config.get("llm_provider", "openai")
+        api_key = config.get(f"{provider}_api_key", "").strip()
+    except Exception:
+        api_key = ""
+        provider = "openai"
+
+    if api_key:
+        print(f"[ImagePrompt] Using batch LLM ({provider}) to generate consistent visual prompts for all {len(scene_paragraphs)} scenes...")
+        system_prompt = (
+            "You are a professional visual director and prompt engineer for Stable Diffusion.\n"
+            "Your job is to translate a sequence of story paragraphs into a list of detailed, descriptive visual image prompts (one prompt per paragraph).\n"
+            "CRITICAL REQUIREMENTS FOR CONSISTENCY:\n"
+            "1. You must maintain strict consistency across all scenes. If a location appears in multiple paragraphs (e.g., the house, a specific room, the forest, a street), use the exact same background details, furniture layout, paint colors, weather, and atmosphere for that location in every scene it appears.\n"
+            "2. For forests, describe the same tree types (e.g. pine trees, birch trees) and path styles (e.g. gravel path, muddy trail). For houses, specify the same wall colors (e.g. grey walls, blue brick) and room style.\n"
+            "3. Focus heavily on the setting and background. Avoid close-up portraits; prefer medium or wide shots that show characters within their environments.\n"
+            "4. Describe visual elements directly. Do NOT write story narration, captions, or text on the image.\n"
+            "5. Output the results as a JSON list of strings. Each string must be a visual prompt of 30-50 words.\n"
+            "6. Output ONLY the raw JSON list of strings, e.g. [\"prompt 1\", \"prompt 2\"]. Do NOT include any markdown formatting like ```json or any explanation."
+        )
+        user_prompt = json.dumps({
+            "story_scenes": scene_paragraphs,
+            "overall_theme": subject,
+            "character_description": character_prompt or ""
+        })
+
+        try:
+            res_text = None
+            if provider == "openai":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "response_format": {"type": "json_object"}
+                }
+                res = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers, timeout=30)
+                res.raise_for_status()
+                res_text = res.json()["choices"][0]["message"]["content"].strip()
+            elif provider == "gemini":
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]
+                    }],
+                    "generationConfig": {
+                        "responseMimeType": "application/json"
+                    }
+                }
+                res = requests.post(url, json=payload, headers=headers, timeout=30)
+                res.raise_for_status()
+                res_text = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            elif provider == "groq":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "llama3-8b-8192",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "response_format": {"type": "json_object"}
+                }
+                res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=30)
+                res.raise_for_status()
+                res_text = res.json()["choices"][0]["message"]["content"].strip()
+            elif provider == "deepseek":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "response_format": {"type": "json_object"}
+                }
+                res = requests.post("https://api.deepseek.com/chat/completions", json=payload, headers=headers, timeout=30)
+                res.raise_for_status()
+                res_text = res.json()["choices"][0]["message"]["content"].strip()
+
+            if res_text:
+                cleaned_json = re.sub(r'^```json\s*|\s*```$', '', res_text, flags=re.MULTILINE).strip()
+                data = json.loads(cleaned_json)
+                prompts_list = None
+                if isinstance(data, dict) and "prompts" in data:
+                    prompts_list = data["prompts"]
+                elif isinstance(data, dict) and "story_scenes" in data:
+                    prompts_list = data["story_scenes"]
+                elif isinstance(data, list):
+                    prompts_list = data
+                else:
+                    for val in data.values():
+                        if isinstance(val, list):
+                            prompts_list = val
+                            break
+
+                if prompts_list and len(prompts_list) == len(scene_paragraphs):
+                    final_prompts = []
+                    for p in prompts_list:
+                        parts = []
+                        if character_prompt and character_prompt.strip():
+                            parts.append(character_prompt.strip())
+                        parts.append(p.strip())
+                        if image_style and image_style.strip():
+                            parts.append('%s style' % image_style.strip())
+                        final_prompt = ', '.join(x for x in parts if x.strip())
+                        final_prompt = re.sub(r',\s*,', ',', final_prompt)
+                        final_prompts.append(re.sub(r'\s+', ' ', final_prompt).strip())
+                    return final_prompts
+        except Exception as err:
+            print(f"[ImagePrompt] Batch prompt generation failed: {err}. Falling back to individual prompts.")
+
+    print("[ImagePrompt] Generating individual scene prompts...")
+    return [generate_scene_image_prompt(scene, subject, image_style, character_prompt) for scene in scene_paragraphs]
+
+def generate_scene_image_prompt(scene_text: str, subject: str, image_style: str = None, character_prompt: str = None) -> str:
+    """
+    Convert a story scene paragraph into a rich, specific visual image prompt.
+    Uses the configured LLM API (OpenAI, Gemini, Groq, or DeepSeek) if available to
+    write descriptive visual prompts. Falls back to a heuristic keyword extractor if offline.
+    """
+    import re
+    import requests
+
+    try:
+        config = load_config()
+        provider = config.get("llm_provider", "openai")
+        api_key = config.get(f"{provider}_api_key", "").strip()
+    except Exception:
+        api_key = ""
+        provider = "openai"
+
+    if api_key:
+        print(f"[ImagePrompt] Using LLM ({provider}) to generate visual prompt for scene: '{scene_text[:40]}...'")
+        system_prompt = (
+            "You are a professional visual director and prompt engineer for Stable Diffusion.\n"
+            "Your job is to translate a story scene paragraph into a detailed, descriptive visual prompt.\n"
+            "CRITICAL REQUIREMENTS:\n"
+            "1. Focus heavily on the setting, background environment, and overall atmosphere. Describe the background details, location features (e.g. messy desk, rainy street, dark bedroom), and mood accurately. Avoid close-up face portraits; prefer medium, wide, or establishing shots that show characters within their environments.\n"
+            "2. Set a strong mood and lighting style (e.g., dramatic shadows, dark suspenseful atmosphere, warm golden hour light, cold neon night reflections) that matches the scene's emotional context.\n"
+            "3. Maintain consistency: use concrete, specific nouns and clear descriptions of the location and setting so it looks like the same place throughout the story.\n"
+            "4. Describe the visual elements directly. Do NOT write story narration, captions, quotes, or text on the image.\n"
+            "5. Identify characters clearly. The narrator ('I') is a man. Use 'a man' or 'a woman' explicitly rather than vague words like 'person'.\n"
+            "6. Make it concise and highly visual (around 30-50 words).\n"
+            "7. Output ONLY the visual prompt text itself. Do NOT include any introduction, explanations, notes, or quotes."
+        )
+        user_prompt = f"Story scene: {scene_text}\nVideo overall theme: {subject}"
+        if character_prompt:
+            user_prompt += f"\nCharacter descriptions to maintain: {character_prompt}"
             
-    # Prioritaskan narasi untuk ekstraksi konteks visual
-    visual_base = " ".join(narration_parts).strip()
-    if not visual_base:
-        # Jika tidak ada narasi, gunakan teks dialog
-        visual_base = " ".join(dialogue_parts).strip()
-    if not visual_base:
-        visual_base = cleaned_text.strip()
-        
-    # 3. Filter kata-kata slang dan pengisi percakapan (case-insensitive)
-    filler_words = {"gue", "lo", "bener-bener", "parah", "gokil", "sih", "deh", "kok"}
-    filler_pattern = r'\b(' + '|'.join(filler_words) + r')\b'
-    
-    cleaned_visual = re.sub(filler_pattern, '', visual_base, flags=re.IGNORECASE)
-    
-    # Bersihkan spasi ganda dan tanda baca gantung
-    cleaned_visual = re.sub(r'\s+', ' ', cleaned_visual).strip()
-    cleaned_visual = re.sub(r'\s*,\s*', ', ', cleaned_visual)
-    cleaned_visual = re.sub(r'^\s*,\s*|\s*,\s*$', '', cleaned_visual)
-    cleaned_visual = re.sub(r'\s*\.\s*', '. ', cleaned_visual)
-    cleaned_visual = re.sub(r'^\s*\.\s*|\s*\.\s*$', '', cleaned_visual)
-    cleaned_visual = cleaned_visual.strip()
-    
-    if not cleaned_visual:
-        cleaned_visual = subject
-        
-    # 4. Gabungkan character_prompt, visual adegan yang dibersihkan, subjek, dan style
+        try:
+            prompt = None
+            if provider == "openai":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                }
+                res = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers, timeout=20)
+                res.raise_for_status()
+                prompt = res.json()["choices"][0]["message"]["content"].strip()
+            elif provider == "gemini":
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "contents": [{
+                        "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]
+                    }]
+                }
+                res = requests.post(url, json=payload, headers=headers, timeout=20)
+                res.raise_for_status()
+                prompt = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            elif provider == "groq":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "llama3-8b-8192",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                }
+                res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
+                res.raise_for_status()
+                prompt = res.json()["choices"][0]["message"]["content"].strip()
+            elif provider == "deepseek":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                }
+                res = requests.post("https://api.deepseek.com/chat/completions", json=payload, headers=headers, timeout=20)
+                res.raise_for_status()
+                prompt = res.json()["choices"][0]["message"]["content"].strip()
+
+            if prompt:
+                prompt_parts = []
+                if character_prompt and character_prompt.strip():
+                    prompt_parts.append(character_prompt.strip())
+                prompt_parts.append(prompt)
+                if image_style and image_style.strip():
+                    prompt_parts.append('%s style' % image_style.strip())
+                final_prompt = ', '.join(p for p in prompt_parts if p.strip())
+                final_prompt = re.sub(r',\s*,', ',', final_prompt)
+                return re.sub(r'\s+', ' ', final_prompt).strip()
+        except Exception as api_err:
+            print(f"[ImagePrompt] LLM prompt generation failed: {api_err}. Falling back to rule-based prompt.")
+
+    # ── Rule-based Fallback ─────────────────────────────────────────────
+    # ── 1. Clean & split ────────────────────────────────────────────────
+    cleaned = re.sub(r'\[[^\]]*\]', '', scene_text)          # remove [sigh], [gasp] etc.
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    parts = re.split(r'("[^"]*")', cleaned)
+    narration_parts, dialogue_parts = [], []
+    for part in parts:
+        p = part.strip()
+        if not p:
+            continue
+        if p.startswith('"') and p.endswith('"'):
+            dialogue_parts.append(p[1:-1].strip())
+        else:
+            narration_parts.append(p)
+
+    visual_base = ' '.join(narration_parts).strip() or ' '.join(dialogue_parts).strip() or cleaned
+
+    # Filter common filler/slang words (case-insensitive)
+    filler_words = {'gue', 'lo', 'bener-bener', 'parah', 'gokil', 'sih', 'deh', 'kok', 'banget', 'emang'}
+    filler_pattern = r'\b(' + '|'.join(re.escape(w) for w in filler_words) + r')\b'
+    visual_base = re.sub(filler_pattern, '', visual_base, flags=re.IGNORECASE)
+    visual_base = re.sub(r'\s+', ' ', visual_base).strip(' ,.')
+
+    # ── 2. Scene-type detection via keyword cues ────────────────────────
+    text_lower = (visual_base + ' ' + subject).lower()
+
+    scene_cues = {
+        'confrontation': ['argument', 'fight', 'confront', 'yell', 'scream', 'accuse', 'angry', 'rage', 'furious', 'shout', 'slam'],
+        'revelation':    ['discover', 'found', 'secret', 'truth', 'realize', 'hidden', 'shocked', 'reveal', 'confession', 'lying', 'lie', 'double life', 'affair'],
+        'emotional':     ['cry', 'tears', 'sob', 'heartbreak', 'lonely', 'sad', 'grief', 'despair', 'regret', 'hurt', 'pain', 'betrayal'],
+        'romantic':      ['love', 'kiss', 'embrace', 'wedding', 'proposal', 'date', 'romance', 'affection'],
+        'investigative': ['investigate', 'search', 'clue', 'evidence', 'phone', 'message', 'text', 'photo', 'proof', 'surveillance'],
+        'location_home': ['home', 'house', 'kitchen', 'bedroom', 'living room', 'apartment', 'door', 'hallway'],
+        'location_work': ['office', 'workplace', 'meeting', 'desk', 'boss', 'coworker', 'job', 'career'],
+        'location_outdoor': ['park', 'street', 'car', 'driving', 'outside', 'city', 'rain', 'night', 'morning'],
+    }
+
+    detected_types = []
+    for scene_type, keywords in scene_cues.items():
+        if any(kw in text_lower for kw in keywords):
+            detected_types.append(scene_type)
+
+    # ── 3. Build scene description from detected types ──────────────────
+    scene_descriptors = []
+
+    if 'confrontation' in detected_types:
+        scene_descriptors.append('tense confrontation scene, dramatic lighting, intense expressions')
+    if 'revelation' in detected_types:
+        scene_descriptors.append('shocking revelation moment, close-up expression of disbelief')
+    if 'emotional' in detected_types:
+        scene_descriptors.append('emotionally charged scene, visible distress and raw emotion')
+    if 'romantic' in detected_types:
+        scene_descriptors.append('intimate romantic scene, warm soft lighting')
+    if 'investigative' in detected_types:
+        scene_descriptors.append('investigative moment, focused detail shot, suspicious atmosphere')
+
+    # Location atmosphere
+    if 'location_home' in detected_types:
+        scene_descriptors.append('detailed cozy interior home setting, warm realistic indoor lighting, lived-in background')
+    elif 'location_work' in detected_types:
+        scene_descriptors.append('detailed corporate office environment, modern desk setup, professional office lighting')
+    elif 'location_outdoor' in detected_types:
+        scene_descriptors.append('highly detailed outdoor urban environment, deep depth of field, atmospheric natural lighting')
+
+    # ── 4. Extract concrete visual keywords from the text ───────────────
+    # Keep meaningful nouns and action phrases (max ~15 words to stay focused)
+    stop_words = {
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+        'of', 'with', 'by', 'from', 'is', 'was', 'are', 'were', 'be', 'been',
+        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+        'should', 'may', 'might', 'that', 'this', 'it', 'he', 'she', 'they',
+        'we', 'i', 'my', 'her', 'his', 'their', 'our', 'your', 'its',
+        'not', 'no', 'so', 'if', 'then', 'when', 'as', 'just', 'up', 'about',
+        'into', 'after', 'before', 'like', 'also', 'more', 'some', 'all',
+    }
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', visual_base)
+    content_words = [w for w in words if w.lower() not in stop_words]
+    # Deduplicate preserving order
+    seen = set()
+    unique_content = []
+    for w in content_words:
+        wl = w.lower()
+        if wl not in seen:
+            seen.add(wl)
+            unique_content.append(w)
+    # Limit to 12 most meaningful words
+    keyword_phrase = ', '.join(unique_content[:12]) if unique_content else visual_base[:80]
+
+    # ── 5. Assemble final prompt: scene > keywords > subject > style ─────
     prompt_parts = []
-    if character_prompt and character_prompt.strip():
-        prompt_parts.append(character_prompt.strip())
-        
-    prompt_parts.append(cleaned_visual)
-    
+
+    # Scene descriptors carry the most visual weight
+    if scene_descriptors:
+        prompt_parts.append(', '.join(scene_descriptors))
+
+    # Concrete keywords from the text
+    if keyword_phrase:
+        prompt_parts.append(keyword_phrase)
+
+    # Subject/topic as setting context
     if subject and subject.strip():
-        prompt_parts.append(f"{subject.strip()} setting")
-        
+        short_subject = subject.strip()[:60]  # truncate very long subjects
+        prompt_parts.append('%s setting' % short_subject)
+
+    # Style as a secondary qualifier (not dominant)
     if image_style and image_style.strip():
-        prompt_parts.append(f"{image_style.strip()} style")
-        
-    final_prompt = ", ".join(prompt_parts)
-    # Bersihkan koma berturut-turut atau spasi berlebih
+        prompt_parts.append('%s style' % image_style.strip())
+
+    # Character prompt ONLY if explicitly provided by the user
+    if character_prompt and character_prompt.strip():
+        prompt_parts.insert(0, character_prompt.strip())
+
+    final_prompt = ', '.join(p for p in prompt_parts if p.strip())
     final_prompt = re.sub(r',\s*,', ',', final_prompt)
     final_prompt = re.sub(r'\s+', ' ', final_prompt).strip()
-    
+
     return final_prompt
+
 
 def humanize_script(script: str, provider: str, api_key: str, language: str, paragraphs: int) -> str:
     print(f"Running Stage 2: Humanizer Agent pass using provider: {provider}")

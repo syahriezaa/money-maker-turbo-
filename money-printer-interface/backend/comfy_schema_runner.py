@@ -424,6 +424,7 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         except Exception as e:
             print(f"[Warning] Failed to load checkpoint {ckpt_path}: {e}")
             
+    if pipe is None:
         target_hf_model = "ItsJayQz/GTA5_Artwork_Diffusion"
         ckpt_lower = params["ckpt_name"].lower() if params.get("ckpt_name") else ""
         if "anything" in ckpt_lower:
@@ -437,26 +438,36 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         
         try:
             print(f"[Loader] Attempting to load {target_hf_model} from local Hugging Face cache...")
+            load_pretrained_kwargs = {
+                "torch_dtype": dtype,
+                "safety_checker": None,
+                "local_files_only": True
+            }
+            if text_encoder is not None:
+                load_pretrained_kwargs["text_encoder"] = text_encoder
             pipe = StableDiffusionPipeline.from_pretrained(
                 target_hf_model,
-                torch_dtype=dtype,
-                safety_checker=None,
-                local_files_only=True
+                **load_pretrained_kwargs
             )
             print("[Loader] Loaded successfully from local cache.")
         except Exception as cache_e:
             print(f"[Loader] Local cache load failed, trying online download: {cache_e}")
             try:
+                load_pretrained_kwargs = {
+                    "torch_dtype": dtype,
+                    "safety_checker": None,
+                    "local_files_only": False
+                }
+                if text_encoder is not None:
+                    load_pretrained_kwargs["text_encoder"] = text_encoder
                 pipe = StableDiffusionPipeline.from_pretrained(
                     target_hf_model,
-                    torch_dtype=dtype,
-                    safety_checker=None,
-                    local_files_only=False
+                    **load_pretrained_kwargs
                 )
                 print("[Loader] Loaded successfully from Hugging Face online.")
             except Exception as online_e:
                 print(f"[Error] Failed to load pipeline online: {online_e}")
-                sys.exit(1)
+                raise RuntimeError(f"Could not load image generation model: {online_e}") from online_e
 
         # Optimize steps and CFG scale for high-speed & high-quality outlines
         params["steps"] = 12
@@ -565,11 +576,18 @@ def run_workflow(workflow_data, output_path=None, overrides=None, device=None):
         eta = int(remaining / speed) if speed > 0 else 0
         bar_len = 10
         filled = int(bar_len * (step + 1) / total_steps)
-        bar = '█' * filled + '░' * (bar_len - filled)
-        sys.stdout.write(
-            f"\r {pct:3d}%|{bar}| {step + 1}/{total_steps} "
-            f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}<{eta//60:02d}:{eta%60:02d}, {speed:.2f}it/s]"
-        )
+        try:
+            bar = '█' * filled + '░' * (bar_len - filled)
+            sys.stdout.write(
+                f"\r {pct:3d}%|{bar}| {step + 1}/{total_steps} "
+                f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}<{eta//60:02d}:{eta%60:02d}, {speed:.2f}it/s]"
+            )
+        except UnicodeEncodeError:
+            bar = '#' * filled + '-' * (bar_len - filled)
+            sys.stdout.write(
+                f"\r {pct:3d}%|{bar}| {step + 1}/{total_steps} "
+                f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}<{eta//60:02d}:{eta%60:02d}, {speed:.2f}it/s]"
+            )
         sys.stdout.flush()
 
     with autocast_ctx:

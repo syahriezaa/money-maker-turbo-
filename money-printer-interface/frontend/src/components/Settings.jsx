@@ -211,6 +211,7 @@ export default function Settings() {
                   <option value="edge-tts">Microsoft Edge TTS (Free)</option>
                   <option value="elevenlabs">ElevenLabs Premium (High Fidelity)</option>
                   <option value="local-chatterbox">Local Chatterbox Turbo</option>
+                  <option value="local-fishaudio">Local Fish Speech (s2-pro)</option>
                 </select>
               </div>
 

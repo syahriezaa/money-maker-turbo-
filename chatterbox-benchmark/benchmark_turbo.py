@@ -106,7 +106,15 @@ def run_benchmark():
     
     output_filename = "chatterbox_turbo_10min.wav"
     print(f"Saving final audio to {output_filename}...")
-    ta.save(output_filename, final_wav, model.sr)
+    try:
+        import soundfile as sf
+        audio_data = final_wav.numpy()
+        if len(audio_data.shape) > 1 and audio_data.shape[0] == 1:
+            audio_data = audio_data[0]
+        sf.write(output_filename, audio_data, model.sr)
+    except Exception as sf_e:
+        print(f"soundfile write failed: {sf_e}. Falling back to torchaudio...")
+        ta.save(output_filename, final_wav, model.sr)
     
     # Calculate stats
     avg_rtf = total_generation_time / total_audio_duration

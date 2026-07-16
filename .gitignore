@@ -40,3 +40,27 @@ Thumbs.db
 **/backend/static/test_ducked_*.wav
 **/backend/static/test_upgraded_*.wav
 **/backend/static/test_horror_*.png
+
+# External Tools and Checkpoints
+**/backend/fish-speech/
+**/backend/checkpoints/
+
+# Local Configs (API Keys)
+**/config.json
+
+# Temporary scratch and test outputs
+*.wav
+*.mp4
+*.png
+**/backend/static/ref_male_en.wav
+**/backend/static/test_final_english_tts.wav
+**/backend/static/test_generated_image.png
+**/backend/static/script_task_*.txt
+**/backend/temp_reddit_payload.json
+
+# Models and weights
+models/
+**/models/
+
+
+
